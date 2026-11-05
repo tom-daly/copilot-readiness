@@ -191,11 +191,34 @@ function Update-CrPace {
     }
 }
 
+function Invoke-CrCertificateWait {
+    <#
+      Runs Do, and if Microsoft doesn't recognise the certificate yet (AADSTS700027), waits and
+      tries again. A new certificate can be accepted by some of Microsoft's servers and refused by
+      others for some minutes, so one that has just worked can still be refused. Other errors
+      go straight back to the caller.
+    #>
+    param([Parameter(Mandatory)] [scriptblock] $Do, [int] $Seconds = 1200, [int] $Every = 15, [scriptblock] $Sleep = { param($s) Start-Sleep -Seconds $s })
+    $until = [DateTime]::UtcNow.AddSeconds($Seconds)
+    $said = $false
+    while ($true) {
+        try { return & $Do }
+        catch {
+            if ($_.Exception.Message -notmatch 'AADSTS700027' -or [DateTime]::UtcNow -ge $until) { throw }
+            if (-not $said) { Write-Host "$(Get-Date -Format 'h:mm:ss tt')  Microsoft is still switching on this PC's certificate. Waiting; this is normal."; $said = $true }
+            & $Sleep $Every
+        }
+    }
+}
+
 function Connect-CrTenant {
-    <# Signs in as the scanner app with the certificate in the Windows certificate store. Settings come from settings.json. #>
-    param([Parameter(Mandatory)] $Settings)
-    Connect-PnPOnline -Url $Settings.sharePointUrl -ClientId $Settings.app.clientId -Tenant $Settings.tenant `
-        -Thumbprint $Settings.app.thumbprint -ErrorAction Stop
+    <#
+      Signs in as the scanner app with the certificate in the Windows certificate store. Settings
+      come from settings.json. NoWait is for a caller that shows its own wait.
+    #>
+    param([Parameter(Mandatory)] $Settings, [switch] $NoWait)
+    $connect = { Connect-PnPOnline -Url $Settings.sharePointUrl -ClientId $Settings.app.clientId -Tenant $Settings.tenant -Thumbprint $Settings.app.thumbprint -ErrorAction Stop }
+    if ($NoWait) { & $connect } else { Invoke-CrCertificateWait $connect }
     $script:Tokens = @{}
 }
 
@@ -204,7 +227,7 @@ function Get-CrToken {
     $key = if ($Graph) { 'Graph' } else { 'SharePoint' }
     $cached = $script:Tokens[$key]
     if (-not $cached -or $cached.Until -lt [DateTime]::UtcNow) {
-        $cached = @{ Value = (Get-PnPAccessToken -ResourceTypeName $key); Until = [DateTime]::UtcNow.AddMinutes(30) }
+        $cached = @{ Value = (Invoke-CrCertificateWait { Get-PnPAccessToken -ResourceTypeName $key }); Until = [DateTime]::UtcNow.AddMinutes(30) }
         $script:Tokens[$key] = $cached
     }
     $cached.Value

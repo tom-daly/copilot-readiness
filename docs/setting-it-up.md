@@ -33,11 +33,13 @@ Your web browser opens and shows Microsoft's own pages:
 1. Sign in as a **Global Administrator**.
 2. Microsoft lists the permissions the scan's app needs. Press **Accept**.
 
+The page opens in your default browser, in whichever profile it last used, so check any other browser windows if you don't see it. If it shows the wrong account, choose **Use another account**. If you use a separate browser profile for this tenant, make that the last one you used before you start.
+
 This creates an app called **Copilot Readiness Scanner (PnP)** in your tenant, with a certificate kept in your Windows certificate store. The app can read every site and who it is shared with. It never changes anything. The permissions are listed at the top of `Start.ps1`, and the details are saved in `settings.json`.
 
 ## Wait while Microsoft switches it on
 
-Go back to the Copilot Readiness window. Microsoft usually takes a few minutes to switch the permissions on, and sometimes up to 20. It keeps trying by itself, so there's nothing to press. It's fine if you see the same message a few times.
+Go back to the Copilot Readiness window. Microsoft usually takes a few minutes to switch the permissions on, and sometimes up to 20. A blue box says nothing is wrong and counts down to the next try. It keeps trying by itself, so there's nothing to press.
 
 ![The window that shows it's waiting for Microsoft](pictures/04-getting-ready.png)
 
@@ -51,6 +53,14 @@ From PowerShell, `./Start.ps1 -Tenant fabrikam` switches straight to that tenant
 
 ## Another PC
 
-The certificate stays on the PC where setup ran. To scan from a different PC, either export the certificate (with its private key) and import it there along with this folder, or run `./Start.ps1 -Setup` on the new PC to create a second app.
+Your tenant only needs one app, and each PC gets its own certificate for it. To scan from a second PC:
+
+1. [Install](install.md) on that PC, then double-click **Start.cmd** and type the same tenant name.
+2. Sign in as a **Global Administrator**. You'll be asked twice: once to check the tenant, and once to add this PC.
+3. Wait for the blue box to finish. This took a minute or two in our tests, and can take longer. Microsoft took about six minutes to fully settle, so a scan started straight away may pause by itself for a while. That is normal.
+
+There's no **Accept** page this time, because the app's permissions were already accepted. Your other PCs keep working.
+
+Each PC keeps its own settings and scan results. If two PCs scan the same tenant at the same time, they share one allowance from Microsoft, so use **Normal** or **Gentle** pace.
 
 **Next:** [Running the scripts](running-the-scripts.md)

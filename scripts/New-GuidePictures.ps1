@@ -246,10 +246,12 @@ try {
         "Setting up Copilot Readiness for $tenant ($sharePoint)"
         'Creating the app registration. A browser window will ask you to sign in as a Global Administrator, and then to accept the permissions.'
         "Signing in to $sharePoint..."
-        "  3:12:05 PM  Microsoft is still switching on the new app's permissions. This usually takes a few minutes and can take up to 20. Trying again in 30 seconds (waited 0 of 20 minutes so far)."
-        "  3:12:35 PM  Microsoft is still switching on the new app's permissions. This usually takes a few minutes and can take up to 20. Trying again in 30 seconds (waited 0.5 of 20 minutes so far)."
+        "Waiting for Microsoft to switch on the app's permissions. This is normal."
     )
     $activity = Start-CrActivityWindow -LogPath $log -Title 'Getting contoso ready'
+    Set-CrActivityWait $activity -Title "Nothing is wrong. Microsoft is switching on the app's permissions." `
+        -Why "This is normal. It usually takes a few minutes and can take up to 20. You don't need to do anything, and this keeps trying by itself." `
+        -Since ([DateTime]::UtcNow.AddSeconds(-95)) -Until ([DateTime]::UtcNow.AddSeconds(23))
     Start-Sleep -Seconds 3
     $hwnd = [CrSnap]::FindOwn([uint32]$PID, 'Copilot Readiness')
     if ($hwnd -ne [IntPtr]::Zero) { Save-Window $hwnd '04-getting-ready.png' } else { Write-Warning 'Setup window not found; picture 04 not taken.' }

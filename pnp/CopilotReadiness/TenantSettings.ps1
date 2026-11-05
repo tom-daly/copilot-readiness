@@ -15,7 +15,7 @@ function Read-CrTenantSettings {
     #>
     param([Parameter(Mandatory)] $Settings)
     $admin = Get-CrAdminUrl $Settings.sharePointUrl
-    $connection = Connect-PnPOnline -Url $admin -ClientId $Settings.app.clientId -Tenant $Settings.tenant -Thumbprint $Settings.app.thumbprint -ReturnConnection -ErrorAction Stop
+    $connection = Invoke-CrCertificateWait { Connect-PnPOnline -Url $admin -ClientId $Settings.app.clientId -Tenant $Settings.tenant -Thumbprint $Settings.app.thumbprint -ReturnConnection -ErrorAction Stop }
     $tenant = Get-PnPTenant -Connection $connection -ErrorAction Stop
     $values = [ordered]@{}
     foreach ($p in $tenant.PSObject.Properties) { $values[$p.Name] = $p.Value }

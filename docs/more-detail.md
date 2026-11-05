@@ -44,5 +44,5 @@ The first run writes this file. You can change it with any text editor:
 ## Removing it
 
 1. Delete the **Copilot Readiness Scanner (PnP)** app in the Entra admin center under App registrations, in each tenant you set up.
-2. Delete its certificate: run `certmgr.msc`, open Personal > Certificates, and remove the ones issued to `pnp.contoso.com` (one per tenant).
+2. On each PC you used, delete its certificate: run `certmgr.msc`, open Personal > Certificates, and remove the ones issued to **Copilot Readiness Scanner (PnP)**.
 3. Delete this folder.

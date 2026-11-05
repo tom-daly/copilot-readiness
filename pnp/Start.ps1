@@ -214,7 +214,7 @@ $newApp = $Setup -or -not $app.clientId -or -not $app.thumbprint
 
 if (-not $newApp -and -not (Test-Path -LiteralPath "Cert:\CurrentUser\My\$($app.thumbprint)")) {
     throw ("The certificate for '$($app.name)' isn't on this PC. Either copy it here (export it from the PC where setup ran, " +
-        "with its private key, and import it into your personal certificates), or run ./Start.ps1 -Setup to create a new app for this PC.")
+        "with its private key, and import it into your personal certificates), or run ./Start.ps1 -Setup to add this PC to the app.")
 }
 
 if ($newApp) {
@@ -236,18 +236,50 @@ if ($newApp) {
     $accepts = (Get-Command Register-PnPEntraIDApp).Parameters
     if ($DeviceLogin -and $accepts.ContainsKey('DeviceLogin')) { $register.DeviceLogin = $true }
     elseif ($accepts.ContainsKey('Interactive')) { $register.Interactive = $true }
-    $created = Register-PnPEntraIDApp @register
 
-    # The output's property names differ a little between PnP versions.
-    $props = $created.PSObject.Properties
-    $app.clientId = "$(($props | Where-Object Name -Match 'ClientId|AppId' | Select-Object -First 1).Value)"
-    $app.thumbprint = "$(($props | Where-Object Name -Match 'Thumbprint' | Select-Object -First 1).Value)"
-    if (-not $app.clientId -or -not $app.thumbprint) { throw "The app was created but its id or certificate thumbprint couldn't be read from: $($created | Out-String)" }
-    $app.createdAt = [DateTimeOffset]::UtcNow.ToString('o')
-    Save-CrSettings $SettingsPath $settings
+    $certificatesBefore = @(Get-CrAppCertificates $app.name | ForEach-Object Thumbprint)
+    $keep = $null
+    try {
+        $alreadyThere = $false
+        $created = $null
+        try { $created = Register-PnPEntraIDApp @register }
+        catch {
+            if ($_.Exception.Message -notmatch 'already exists') { throw }
+            $alreadyThere = $true
+        }
 
-    # The certificate's private key now lives in your certificate store; don't leave a copy lying around.
-    Get-ChildItem -LiteralPath $certFolder -Filter '*.pfx' | Remove-Item -Force
+        if ($alreadyThere) {
+            # Set up before on another PC: this PC joins that app, with the certificate PnP has just made here.
+            Write-Host "'$($app.name)' is already set up in this tenant, probably on another PC, so this PC will use it too." -ForegroundColor Cyan
+            Write-Host 'A browser window will ask you to sign in as a Global Administrator once more, so this PC can be added.'
+            $certificate = @(Get-CrAppCertificates $app.name | Where-Object { $certificatesBefore -notcontains $_.Thumbprint } | Sort-Object NotBefore -Descending) | Select-Object -First 1
+            if (-not $certificate) { throw "The certificate for this PC wasn't made, so it can't be added to '$($app.name)'. Start again." }
+            $graph = New-CrAdminGraph -Settings $settings -DeviceLogin:$DeviceLogin
+            $joined = Add-CrCertificateToApp -Graph $graph -AppName $app.name -Certificate $certificate
+            Write-Host "This PC now uses the app with ID $($joined.AppId)."
+            $switchingOn = "this PC's certificate"
+            $app.clientId = $joined.AppId
+            $app.thumbprint = $certificate.Thumbprint
+            if (-not $joined.Accepted) {
+                Write-Host "The app's permissions haven't been accepted yet. A browser window will ask you to accept them."
+                Start-Process "https://login.microsoftonline.com/$($settings.tenant)/adminconsent?client_id=$($joined.AppId)"
+            }
+        }
+        else {
+            # The output's property names differ a little between PnP versions.
+            $props = $created.PSObject.Properties
+            $app.clientId = "$(($props | Where-Object Name -Match 'ClientId|AppId' | Select-Object -First 1).Value)"
+            $app.thumbprint = "$(($props | Where-Object Name -Match 'Thumbprint' | Select-Object -First 1).Value)"
+            if (-not $app.clientId -or -not $app.thumbprint) { throw "The app was created but its id or certificate thumbprint couldn't be read from: $($created | Out-String)" }
+        }
+        $keep = $app.thumbprint
+        $app.createdAt = [DateTimeOffset]::UtcNow.ToString('o')
+        Save-CrSettings $SettingsPath $settings
+    }
+    finally {
+        # The certificate's private key now lives in your certificate store; don't leave a copy lying around.
+        Remove-CrSetupLeftovers -CertificateFolder $certFolder -AppName $app.name -CertificatesBefore $certificatesBefore -Keep $keep
+    }
 }
 
 # ── Sign in. A new app's permissions can take a few minutes to reach SharePoint. ──
@@ -258,16 +290,27 @@ Write-Host "Signing in to $($settings.sharePointUrl)..."
 $created = [DateTimeOffset]::MinValue
 $young = $newApp -or ([DateTimeOffset]::TryParse("$($app.createdAt)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$created) -and
     $created -gt [DateTimeOffset]::UtcNow.AddHours(-2))
-$tries = if ($young) { 40 } else { 1 }
-for ($attempt = 1; ; $attempt++) {
+if (-not (Test-Path variable:switchingOn)) { $switchingOn = "the app's permissions" }
+# Microsoft's servers don't all accept something new at the same moment, so one good sign-in
+# doesn't mean it's ready. After a new setup, several in a row have to work.
+$needed = if ($newApp) { 3 } else { 1 }
+$good = 0
+$waitSince = $null
+$told = $false
+$giveUpAt = [DateTime]::UtcNow.AddMinutes($(if ($young) { 20 } else { 0 }))
+while ($true) {
     try {
-        Connect-CrTenant $settings
+        Connect-CrTenant $settings -NoWait
         $null = Invoke-CrGraph 'sites/getAllSites?$select=id&$top=1'
         $null = Invoke-CrGet "$($settings.sharePointUrl)/_api/web/RoleAssignments?`$top=1"
-        break
+        $good++
+        if ($good -ge $needed) { break }
+        $pause = 10
     }
     catch {
-        if ($attempt -ge $tries) {
+        $good = 0
+        $pause = 30
+        if ([DateTime]::UtcNow -ge $giveUpAt) {
             if ($young) {
                 throw ("The app is set up and saved, but after 20 minutes Microsoft still won't let it read your sites. Check the permissions were accepted " +
                     "(Entra admin center > App registrations > '$($app.name)' > API permissions: each should say 'Granted'), then start again. " +
@@ -275,13 +318,23 @@ for ($attempt = 1; ; $attempt++) {
             }
             throw
         }
-        $waited = [Math]::Round(($attempt - 1) * 0.5, 1)
-        Write-Host ("  {0:h:mm:ss tt}  Microsoft is still switching on the new app's permissions. This usually takes a few minutes and can take up to 20. " -f (Get-Date)) -NoNewline
-        Write-Host "Trying again in 30 seconds (waited $waited of 20 minutes so far)."
         Write-Verbose $_.Exception.Message
-        Start-Sleep -Seconds 30
     }
+    # Normal for a new app or certificate: say so in plain words. The technical error stays in the log.
+    if (-not $waitSince) { $waitSince = [DateTime]::UtcNow }
+    $headline = if ($good) { "Almost there. Microsoft is finishing switching on $switchingOn." } else { "Nothing is wrong. Microsoft is switching on $switchingOn." }
+    if ($script:activity) {
+        if (-not $told) { Write-Host "Waiting for Microsoft to switch on $switchingOn. This is normal."; $told = $true }
+        Set-CrActivityWait $script:activity -Title $headline `
+            -Why "This is normal. It usually takes a few minutes and can take up to 20. You don't need to do anything, and this keeps trying by itself." `
+            -Since $waitSince -Until ([DateTime]::UtcNow.AddSeconds($pause))
+    }
+    else {
+        Write-Host ("  {0:h:mm:ss tt}  $headline This is normal, and can take up to 20 minutes. Trying again in $pause seconds." -f (Get-Date))
+    }
+    Start-Sleep -Seconds $pause
 }
+Set-CrActivityWait $script:activity
 if ($newApp) { Write-Host 'Setup done. This PC is ready to scan.' -ForegroundColor Green }
 
 # ── Scan ────────────────────────────────────────────────────────────────────

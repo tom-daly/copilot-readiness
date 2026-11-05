@@ -1,0 +1,184 @@
+{
+  "about": "The Copilot Readiness rule book: every rule's check and severity, how scores are worked out, the thresholds the rules use, and the sites set aside on purpose (setAside: matched by the root web's WebTemplate, recorded as Skipped with the reason, no findings, no score). The scan reads this file, so change a rule here, not in the scan.",
+  "version": 3,
+
+  "checks": [
+    {
+      "id": "Oversharing",
+      "name": "Oversharing",
+      "description": "Content that far more people can open than probably should. Copilot shows people anything they can open, so this is the biggest risk."
+    },
+    {
+      "id": "ExternalGuests",
+      "name": "External guests",
+      "description": "People from outside your organization who can get into your sites."
+    },
+    {
+      "id": "SensitivityLabels",
+      "name": "Sensitivity labels",
+      "description": "Sites and files with no sensitivity label to say how carefully they should be handled."
+    },
+    {
+      "id": "StaleOwnerless",
+      "name": "Stale or ownerless",
+      "description": "Sites nobody looks after or nobody has used in a long time."
+    }
+  ],
+
+  "severities": ["High", "Medium", "Low"],
+
+  "siteKinds": [
+    { "id": "SharePoint", "name": "SharePoint sites", "inTenantScore": true },
+    { "id": "OneDrive", "name": "OneDrive", "inTenantScore": false, "ownScore": true }
+  ],
+
+  "setAside": [
+    {
+      "id": "AppCatalog",
+      "name": "App catalog",
+      "webTemplate": "APPCATALOG",
+      "reason": "The app catalog holds the apps people can add to SharePoint and Teams. Everyone in the organization needs to be able to read it, and it holds app packages rather than business documents, so it isn't checked or scored."
+    }
+  ],
+
+  "rules": [
+    {
+      "id": "EveryoneGrant",
+      "name": "Open to everyone",
+      "advice": "Everyone in your organization has been given access here, either directly or through one of the site’s groups. Copilot can show this content to anyone in the company who asks about it. Remove “Everyone” and give access only to the people who need it.",
+      "check": "Oversharing",
+      "appliesTo": ["SharePoint", "OneDrive"],
+      "severity": "High",
+      "raisedWhen": "\"Everyone\" or \"Everyone except external users\" is granted on a site, library, folder or file, directly or inside a SharePoint group"
+    },
+    {
+      "id": "PublicGroup",
+      "name": "Public team or group",
+      "advice": "This site belongs to a public Microsoft 365 group or team, so anyone in your organization can join and see its content, and Copilot can surface it to them. Make the group private if the content isn’t meant for everyone.",
+      "check": "Oversharing",
+      "appliesTo": ["SharePoint"],
+      "severity": "High",
+      "raisedWhen": "The site belongs to a public Microsoft 365 group"
+    },
+    {
+      "id": "AnyoneLink",
+      "name": "“Anyone” link",
+      "advice": "There is a sharing link that works for anyone who has it, with no sign-in needed. Whoever the link is forwarded to can open this content. Remove the link or replace it with one for specific people.",
+      "check": "Oversharing",
+      "appliesTo": ["SharePoint", "OneDrive"],
+      "severity": "High",
+      "raisedWhen": "An \"Anyone with the link\" sharing link exists"
+    },
+    {
+      "id": "OrgWideLink",
+      "name": "Company-wide link",
+      "advice": "There is a sharing link that works for everyone in your organization. Anyone who comes across it can open the content, and Copilot may show it to people it was never meant for. Replace it with a link for specific people.",
+      "check": "Oversharing",
+      "appliesTo": ["SharePoint", "OneDrive"],
+      "severity": "Medium",
+      "raisedWhen": "A \"People in your organization\" sharing link exists"
+    },
+    {
+      "id": "BroadFullControl",
+      "name": "Too many people in full control",
+      "advice": "A group other than the site’s own owners, or a group with more than 50 members, has full control here. Those people can change, delete or re-share anything. Limit full control to the site owners.",
+      "check": "Oversharing",
+      "appliesTo": ["SharePoint"],
+      "severity": "Medium",
+      "raisedWhen": "A group other than the site's own Owners group has Full Control, or any group with more than 50 members has Full Control"
+    },
+    {
+      "id": "BrokenInheritance",
+      "name": "Items with their own permissions",
+      "advice": "Some files or folders in this library have their own permissions instead of following the library’s. That makes it hard to know who can see what. The detail column shows how many items are affected.",
+      "check": "Oversharing",
+      "appliesTo": ["SharePoint"],
+      "severity": "Low",
+      "raisedWhen": "A library or list has items with their own permissions (one finding per library or list; `detail` holds the count)"
+    },
+    {
+      "id": "GuestAccess",
+      "name": "Guest has access",
+      "advice": "Someone from outside your organization has been given access here, directly or through a site group. Guests who can edit are rated High; guests who can only read are rated Medium. Check they still need it.",
+      "check": "ExternalGuests",
+      "appliesTo": ["SharePoint", "OneDrive"],
+      "severity": "Medium",
+      "severityWhenCanEdit": "High",
+      "raisedWhen": "A guest account is granted access directly or through a site group"
+    },
+    {
+      "id": "GuestInGroup",
+      "name": "Guests in the team",
+      "advice": "The site’s Microsoft 365 group or team has guest members from outside your organization, so they can see the group’s content. Check they still need to be members.",
+      "check": "ExternalGuests",
+      "appliesTo": ["SharePoint"],
+      "severity": "Medium",
+      "raisedWhen": "The site's Microsoft 365 group has guest members"
+    },
+    {
+      "id": "SiteUnlabeled",
+      "name": "Site has no label",
+      "advice": "The site hasn’t been given a sensitivity label, so nothing tells people or Copilot how carefully its content should be handled. Apply the label that fits the site.",
+      "check": "SensitivityLabels",
+      "appliesTo": ["SharePoint"],
+      "severity": "Medium",
+      "raisedWhen": "The site has no sensitivity label"
+    },
+    {
+      "id": "FilesUnlabeled",
+      "name": "Files without labels",
+      "advice": "Some files in this library have no sensitivity label. The detail column shows how many. Consider a default label for the library.",
+      "check": "SensitivityLabels",
+      "appliesTo": ["SharePoint"],
+      "severity": "Low",
+      "raisedWhen": "A library has files with no sensitivity label (one finding per library; `detail` holds the count)"
+    },
+    {
+      "id": "SiteOwnerless",
+      "name": "No owner",
+      "advice": "Nobody active owns or runs this site, so no one is looking after who has access. Assign at least two owners or archive the site.",
+      "check": "StaleOwnerless",
+      "appliesTo": ["SharePoint"],
+      "severity": "High",
+      "raisedWhen": "No active owner or site admin"
+    },
+    {
+      "id": "SiteStale",
+      "name": "Inactive site",
+      "advice": "Nothing on this site has changed in 180 days. Old content can still turn up in Copilot answers. Consider archiving or deleting it.",
+      "check": "StaleOwnerless",
+      "appliesTo": ["SharePoint"],
+      "severity": "Medium",
+      "raisedWhen": "No content changed in 180 days"
+    },
+    {
+      "id": "SiteSingleOwner",
+      "name": "Only one owner",
+      "advice": "This site has just one owner. If that person leaves or is away, nobody can manage access. Add a second owner.",
+      "check": "StaleOwnerless",
+      "appliesTo": ["SharePoint"],
+      "severity": "Low",
+      "raisedWhen": "Exactly one owner"
+    }
+  ],
+
+  "thresholds": {
+    "staleDays": 180,
+    "largeGroupMembers": 50
+  },
+
+  "score": {
+    "start": 100,
+    "minimum": 0,
+    "penalty": { "High": 15, "Medium": 5, "Low": 1 },
+    "tenant": "The average of the scores of the sites whose kind counts towards the tenant score (siteKinds), rounded to the nearest whole number, halves to the even number (2.5 -> 2, 3.5 -> 4). Blank when no such site has a score.",
+    "ownScore": "Each kind of site with ownScore (OneDrive) is scored the same way as a site: it starts at start and loses penalty per finding, down to minimum. Its own score is the average of those scores, rounded the same way as the tenant score and shown beside it, never mixed into it. Blank when no such site has a score.",
+    "bands": { "good": 80, "fair": 50 }
+  },
+
+  "finding": {
+    "fields": ["id", "check", "rule", "severity", "siteId", "siteUrl", "path", "objectType", "principal", "principalLogin", "permission", "detail", "verifiedAt"],
+    "objectTypes": ["Site", "Subsite", "Library", "List", "Folder", "File", "Item", "Group"],
+    "id": "The first 24 characters, lower case, of the hex SHA-256 of the UTF-8 text lower(siteId)|lower(path)|rule|lower(principalLogin). The same issue gets the same id in every scan, so two scans can be compared."
+  }
+}

@@ -1,0 +1,7 @@
+dist/
+pnp/settings.json
+pnp/certificate/
+pnp/results/
+pnp/logs/
+*.pem
+*.pfx

@@ -1,0 +1,328 @@
+{
+  "about": "Test cases for the rule book. Each case gives the facts a scan collected and exactly the findings they must produce. The scan's tests (pnp/tests) run every case.",
+  "site": { "siteId": "contoso.sharepoint.com,aaa,bbb", "url": "https://contoso.sharepoint.com/sites/finance", "title": "Finance" },
+  "now": "2026-10-01T12:00:00Z",
+
+  "principals": [
+    { "login": "c:0(.s|true", "title": "Everyone", "principalType": 4, "kind": "Everyone" },
+    { "login": "c:0-.f|rolemanager|spo-grid-all-users/9cd0a0e2-0000-0000-0000-000000000000", "title": "Everyone except external users", "principalType": 4, "kind": "EveryoneExceptExternal" },
+    { "login": "SharingLinks.0a1b.AnonymousEdit.2c3d", "title": "SharingLinks.0a1b.AnonymousEdit.2c3d", "principalType": 8, "kind": "AnyoneLink" },
+    { "login": "SharingLinks.0a1b.OrganizationView.2c3d", "title": "SharingLinks.0a1b.OrganizationView.2c3d", "principalType": 8, "kind": "OrganizationLink" },
+    { "login": "SharingLinks.0a1b.Flexible.2c3d", "title": "SharingLinks.0a1b.Flexible.2c3d", "principalType": 8, "kind": "SpecificPeopleLink" },
+    { "login": "", "title": "SharingLinks.0a1b.AnonymousView.2c3d", "principalType": 8, "kind": "AnyoneLink" },
+    { "login": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "title": "Ann", "principalType": 1, "kind": "Guest" },
+    { "login": "i:0#.f|membership|urn:spo:guest#raj@tailspin.com", "title": "Raj", "principalType": 1, "kind": "Guest" },
+    { "login": "SHAREPOINT\\system", "title": "System Account", "principalType": 1, "kind": "System" },
+    { "login": "i:0i.t|00000003-0000-0ff1-ce00-000000000000|app@sharepoint", "title": "SharePoint App", "principalType": 1, "kind": "System" },
+    { "login": "i:0i.t|ms.sp.ext|5e6f0000-0000-0000-0000-000000000000@contoso", "title": "Some App", "principalType": 1, "kind": "System" },
+    { "login": "Finance Members", "title": "Finance Members", "principalType": 8, "kind": "SharePointGroup" },
+    { "login": "c:0o.c|federateddirectoryclaimprovider|1b2c3d4e-0000-0000-0000-000000000000", "title": "Finance Members", "principalType": 4, "kind": "M365Group" },
+    { "login": "c:0o.c|federateddirectoryclaimprovider|1b2c3d4e-0000-0000-0000-000000000000_o", "title": "Finance Owners", "principalType": 4, "kind": "M365GroupOwners" },
+    { "login": "c:0t.c|tenant|5e6f0000-0000-0000-0000-000000000000", "title": "IT Admins", "principalType": 4, "kind": "SecurityGroup" },
+    { "login": "i:0#.f|membership|dana@contoso.com", "title": "Dana", "principalType": 1, "kind": "User" }
+  ],
+
+  "guestEmails": [
+    { "login": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "email": "ann@fabrikam.com" },
+    { "login": "ann_fabrikam.com#EXT#@contoso.onmicrosoft.com", "email": "ann@fabrikam.com" },
+    { "login": "i:0#.f|membership|first_last_tailspin.co.uk#ext#@contoso.onmicrosoft.com", "email": "first_last@tailspin.co.uk" },
+    { "login": "i:0#.f|membership|urn:spo:guest#raj@tailspin.com", "email": "urn:spo:guest#raj@tailspin.com" }
+  ],
+
+  "groupIds": [
+    { "login": "c:0o.c|federateddirectoryclaimprovider|1B2C3D4E-0000-0000-0000-000000000000_o", "groupId": "1b2c3d4e-0000-0000-0000-000000000000" },
+    { "login": "c:0t.c|tenant|5e6f0000-0000-0000-0000-000000000000", "groupId": "5e6f0000-0000-0000-0000-000000000000" },
+    { "login": "Finance Members", "groupId": null }
+  ],
+
+  "grants": [
+    {
+      "name": "Everyone except external users on the site is high",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "assignments": [
+        { "principalId": 5, "loginName": "c:0-.f|rolemanager|spo-grid-all-users/x", "title": "Everyone except external users", "principalType": 4, "roles": [ { "name": "Read", "kind": 2 } ] }
+      ],
+      "expect": [
+        { "id": "4e54b7a7d005ce361dd86950", "check": "Oversharing", "rule": "EveryoneGrant", "severity": "High", "objectType": "Site", "path": "", "principal": "Everyone except external users", "principalLogin": "c:0-.f|rolemanager|spo-grid-all-users/x", "permission": "Read", "detail": null }
+      ]
+    },
+    {
+      "name": "Everyone with edit on a file",
+      "object": { "objectType": "File", "path": "/sites/finance/Shared Documents/Budget.xlsx" },
+      "scope": "Item",
+      "assignments": [
+        { "principalId": 6, "loginName": "c:0(.s|true", "title": "Everyone", "principalType": 4, "roles": [ { "name": "Edit", "kind": 6 } ] }
+      ],
+      "expect": [
+        { "id": "a2d9cc7e220e96ec68763af5", "check": "Oversharing", "rule": "EveryoneGrant", "severity": "High", "objectType": "File", "path": "/sites/finance/Shared Documents/Budget.xlsx", "principal": "Everyone", "principalLogin": "c:0(.s|true", "permission": "Edit", "detail": null }
+      ]
+    },
+    {
+      "name": "Everyone hidden inside the visitors group is found",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "groups": { "7": { "title": "Finance Visitors", "broadClaim": "EveryoneExceptExternal", "guests": [], "memberCount": 3 } },
+      "assignments": [
+        { "principalId": 7, "loginName": "Finance Visitors", "title": "Finance Visitors", "principalType": 8, "roles": [ { "name": "Read", "kind": 2 } ] }
+      ],
+      "expect": [
+        { "id": "7aeb5dc66c157d037424540f", "check": "Oversharing", "rule": "EveryoneGrant", "severity": "High", "objectType": "Site", "path": "", "principal": "Finance Visitors", "principalLogin": "Finance Visitors", "permission": "Read", "detail": "The group contains Everyone except external users" }
+      ]
+    },
+    {
+      "name": "Limited access only grants are ignored",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "assignments": [
+        { "principalId": 5, "loginName": "c:0-.f|rolemanager|spo-grid-all-users/x", "title": "Everyone except external users", "principalType": 4, "roles": [ { "name": "Limited Access", "kind": 1 } ] },
+        { "principalId": 6, "loginName": "c:0(.s|true", "title": "Everyone", "principalType": 4, "roles": [ { "name": "Web-Only Limited Access", "kind": 0 } ] }
+      ],
+      "expect": []
+    },
+    {
+      "name": "Anyone and organization links are flagged with their permission",
+      "object": { "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll" },
+      "scope": "Item",
+      "assignments": [
+        { "principalId": 20, "loginName": "SharingLinks.f.AnonymousEdit.s", "title": "SharingLinks.f.AnonymousEdit.s", "principalType": 8, "roles": [ { "name": "Edit", "kind": 6 } ] },
+        { "principalId": 21, "loginName": "SharingLinks.f.OrganizationView.s", "title": "SharingLinks.f.OrganizationView.s", "principalType": 8, "roles": [ { "name": "Read", "kind": 2 } ] }
+      ],
+      "expect": [
+        { "id": "0e1493106f647db5caa75621", "check": "Oversharing", "rule": "AnyoneLink", "severity": "High", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "Anyone with the link", "principalLogin": "SharingLinks.f.AnonymousEdit.s", "permission": "Edit", "detail": null },
+        { "id": "661d14abaffc3f681e4a4117", "check": "Oversharing", "rule": "OrgWideLink", "severity": "Medium", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "People in your organization with the link", "principalLogin": "SharingLinks.f.OrganizationView.s", "permission": "View", "detail": null }
+      ]
+    },
+    {
+      "name": "Guest severity depends on whether they can edit",
+      "object": { "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll" },
+      "scope": "Item",
+      "assignments": [
+        { "principalId": 30, "loginName": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "title": "Ann", "principalType": 1, "roles": [ { "name": "Edit", "kind": 6 } ] },
+        { "principalId": 31, "loginName": "i:0#.f|membership|raj_tailspin.com#ext#@contoso.onmicrosoft.com", "title": "Raj", "principalType": 1, "roles": [ { "name": "Read", "kind": 2 } ] },
+        { "principalId": 32, "loginName": "i:0#.f|membership|lee_northwind.com#ext#@contoso.onmicrosoft.com", "title": "", "principalType": 1, "roles": [ { "name": "Read", "kind": 2 }, { "name": "Contribute", "kind": 3 } ] }
+      ],
+      "expect": [
+        { "id": "f55e8008440f26cf726974ee", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "High", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Edit", "detail": null },
+        { "id": "32d299d2234de895cbe5f71a", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "Medium", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "Raj (raj@tailspin.com)", "principalLogin": "i:0#.f|membership|raj_tailspin.com#ext#@contoso.onmicrosoft.com", "permission": "Read", "detail": null },
+        { "id": "2e28acad3fdbb61a3c62a48a", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "High", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "lee@northwind.com", "principalLogin": "i:0#.f|membership|lee_northwind.com#ext#@contoso.onmicrosoft.com", "permission": "Contribute", "detail": null }
+      ]
+    },
+    {
+      "name": "Custom permission levels count as edit unless they say read or view",
+      "object": { "objectType": "File", "path": "/sites/finance/Shared Documents/Plan.docx" },
+      "scope": "Item",
+      "assignments": [
+        { "principalId": 33, "loginName": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "title": "Ann", "principalType": 1, "roles": [ { "name": "Approve", "kind": 0 } ] },
+        { "principalId": 34, "loginName": "i:0#.f|membership|raj_tailspin.com#ext#@contoso.onmicrosoft.com", "title": "Raj", "principalType": 1, "roles": [ { "name": "Restricted VIEW", "kind": 0 } ] }
+      ],
+      "expect": [
+        { "id": "07eb02456ca01aa4619750ad", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "High", "objectType": "File", "path": "/sites/finance/Shared Documents/Plan.docx", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Approve", "detail": null },
+        { "id": "34f1efe2bbf18f10e7e53d78", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "Medium", "objectType": "File", "path": "/sites/finance/Shared Documents/Plan.docx", "principal": "Raj (raj@tailspin.com)", "principalLogin": "i:0#.f|membership|raj_tailspin.com#ext#@contoso.onmicrosoft.com", "permission": "Restricted VIEW", "detail": null }
+      ]
+    },
+    {
+      "name": "Guests reached through a specific people link are flagged",
+      "object": { "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll" },
+      "scope": "Item",
+      "groups": { "40": { "title": "SharingLinks.f.Flexible.s", "broadClaim": null, "guests": [ { "login": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "name": "Ann" } ], "memberCount": 2 } },
+      "assignments": [
+        { "principalId": 40, "loginName": "SharingLinks.f.Flexible.s", "title": "SharingLinks.f.Flexible.s", "principalType": 8, "roles": [ { "name": "Edit", "kind": 6 } ] }
+      ],
+      "expect": [
+        { "id": "f55e8008440f26cf726974ee", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "High", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Edit", "detail": "Shared with them through a link" }
+      ]
+    },
+    {
+      "name": "Guests inside a site group are flagged with the group's permission",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "groups": { "8": { "title": "Finance Members", "broadClaim": null, "guests": [ { "login": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "name": "Ann" } ], "memberCount": 9 } },
+      "assignments": [
+        { "principalId": 8, "loginName": "Finance Members", "title": "Finance Members", "principalType": 8, "roles": [ { "name": "Edit", "kind": 6 } ] }
+      ],
+      "expect": [
+        { "id": "8dc33c6c4244f88631603650", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "High", "objectType": "Site", "path": "", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Edit", "detail": "Member of Finance Members" }
+      ]
+    },
+    {
+      "name": "Full Control for the owners group is fine but for other groups is flagged",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "ownersGroupId": 3,
+      "groups": {
+        "3": { "title": "Finance Owners", "broadClaim": null, "guests": [], "memberCount": 2 },
+        "9": { "title": "Finance Helpers", "broadClaim": null, "guests": [], "memberCount": 12 }
+      },
+      "assignments": [
+        { "principalId": 3, "loginName": "Finance Owners", "title": "Finance Owners", "principalType": 8, "roles": [ { "name": "Full Control", "kind": 5 } ] },
+        { "principalId": 9, "loginName": "Finance Helpers", "title": "Finance Helpers", "principalType": 8, "roles": [ { "name": "Full Control", "kind": 5 } ] }
+      ],
+      "expect": [
+        { "id": "5beb0539588f891a0c9b835a", "check": "Oversharing", "rule": "BroadFullControl", "severity": "Medium", "objectType": "Site", "path": "", "principal": "Finance Helpers", "principalLogin": "Finance Helpers", "permission": "Full Control", "detail": "12 members" }
+      ]
+    },
+    {
+      "name": "A huge owners group with Full Control is flagged",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "ownersGroupId": 3,
+      "groups": { "3": { "title": "Finance Owners", "broadClaim": null, "guests": [], "memberCount": 120 } },
+      "assignments": [
+        { "principalId": 3, "loginName": "Finance Owners", "title": "Finance Owners", "principalType": 8, "roles": [ { "name": "Full Control", "kind": 5 } ] }
+      ],
+      "expect": [
+        { "id": "ec64636f9fc1705886cc28ee", "check": "Oversharing", "rule": "BroadFullControl", "severity": "Medium", "objectType": "Site", "path": "", "principal": "Finance Owners", "principalLogin": "Finance Owners", "permission": "Full Control", "detail": "120 members have Full Control" }
+      ]
+    },
+    {
+      "name": "An owners group of exactly the large group size is not flagged",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "ownersGroupId": 3,
+      "groups": { "3": { "title": "Finance Owners", "broadClaim": null, "guests": [], "memberCount": 50 } },
+      "assignments": [
+        { "principalId": 3, "loginName": "Finance Owners", "title": "Finance Owners", "principalType": 8, "roles": [ { "name": "Full Control", "kind": 5 } ] }
+      ],
+      "expect": []
+    },
+    {
+      "name": "The site's own Microsoft 365 owners are not broad Full Control",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "siteGroupId": "1b2c3d4e-0000-0000-0000-000000000000",
+      "assignments": [
+        { "principalId": 11, "loginName": "c:0o.c|federateddirectoryclaimprovider|1b2c3d4e-0000-0000-0000-000000000000_o", "title": "Finance Owners", "principalType": 4, "roles": [ { "name": "Full Control", "kind": 5 } ] },
+        { "principalId": 12, "loginName": "c:0t.c|tenant|5e6f0000-0000-0000-0000-000000000000", "title": "IT Admins", "principalType": 4, "roles": [ { "name": "Full Control", "kind": 5 } ] }
+      ],
+      "expect": [
+        { "id": "48dd9940fb96bcd1388ab3e5", "check": "Oversharing", "rule": "BroadFullControl", "severity": "Medium", "objectType": "Site", "path": "", "principal": "IT Admins", "principalLogin": "c:0t.c|tenant|5e6f0000-0000-0000-0000-000000000000", "permission": "Full Control", "detail": "A directory group has Full Control" }
+      ]
+    },
+    {
+      "name": "Item scope does not repeat site group findings",
+      "object": { "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll" },
+      "scope": "Item",
+      "groups": { "7": { "title": "Finance Visitors", "broadClaim": "EveryoneExceptExternal", "guests": [], "memberCount": 3 } },
+      "assignments": [
+        { "principalId": 7, "loginName": "Finance Visitors", "title": "Finance Visitors", "principalType": 8, "roles": [ { "name": "Read", "kind": 2 } ] },
+        { "principalId": 12, "loginName": "c:0t.c|tenant|5e6f0000-0000-0000-0000-000000000000", "title": "IT Admins", "principalType": 4, "roles": [ { "name": "Full Control", "kind": 5 } ] }
+      ],
+      "expect": []
+    },
+    {
+      "name": "Ordinary people and system accounts are not findings",
+      "object": { "objectType": "Site", "path": "" },
+      "scope": "Site",
+      "assignments": [
+        { "principalId": 1, "loginName": "i:0#.f|membership|dana@contoso.com", "title": "Dana", "principalType": 1, "roles": [ { "name": "Full Control", "kind": 5 } ] },
+        { "principalId": 2, "loginName": "SHAREPOINT\\system", "title": "System Account", "principalType": 1, "roles": [ { "name": "Full Control", "kind": 5 } ] }
+      ],
+      "expect": []
+    }
+  ],
+
+  "siteFacts": [
+    {
+      "name": "Site facts produce the expected findings",
+      "staleDays": 180,
+      "facts": {
+        "isGroupConnected": true, "isPublicGroup": true, "sensitivityLabel": null, "labelKnown": true,
+        "lastContentChange": "2025-08-27T12:00:00Z", "ownerCount": 0, "ownersKnown": true,
+        "groupGuests": [ { "login": "ann_fabrikam.com#EXT#@contoso.onmicrosoft.com", "name": "Ann" } ]
+      },
+      "expect": [
+        { "id": "27eb928708f80317e0551e64", "check": "Oversharing", "rule": "PublicGroup", "severity": "High", "objectType": "Site", "path": "", "principal": "Everyone in the organization", "principalLogin": "", "permission": "Member", "detail": "The site's Microsoft 365 group is public, so anyone in the organization can join and see it" },
+        { "id": "21fb6ccd1f16cb0814690c1c", "check": "ExternalGuests", "rule": "GuestInGroup", "severity": "Medium", "objectType": "Group", "path": "", "principal": "Ann", "principalLogin": "ann_fabrikam.com#EXT#@contoso.onmicrosoft.com", "permission": "Member", "detail": "Guest member of the site's Microsoft 365 group" },
+        { "id": "0075f7a4cc79a0ddd7eff599", "check": "SensitivityLabels", "rule": "SiteUnlabeled", "severity": "Medium", "objectType": "Site", "path": "", "principal": "", "principalLogin": "", "permission": "", "detail": null },
+        { "id": "099d2c23955f55f232c377db", "check": "StaleOwnerless", "rule": "SiteOwnerless", "severity": "High", "objectType": "Site", "path": "", "principal": "", "principalLogin": "", "permission": "", "detail": "No active owner or site admin" },
+        { "id": "53f43950b257a63ee5fd7f08", "check": "StaleOwnerless", "rule": "SiteStale", "severity": "Medium", "objectType": "Site", "path": "", "principal": "", "principalLogin": "", "permission": "", "detail": "No content changed since 2025-08-27" }
+      ]
+    },
+    {
+      "name": "Unknown label or owners are not reported as missing",
+      "staleDays": 180,
+      "facts": {
+        "isGroupConnected": false, "isPublicGroup": false, "sensitivityLabel": null, "labelKnown": false,
+        "lastContentChange": "2026-10-01T12:00:00Z", "ownerCount": 0, "ownersKnown": false, "groupGuests": []
+      },
+      "expect": []
+    },
+    {
+      "name": "Single owner is low",
+      "staleDays": 180,
+      "facts": {
+        "isGroupConnected": false, "isPublicGroup": false, "sensitivityLabel": "General", "labelKnown": true,
+        "lastContentChange": "2026-10-01T12:00:00Z", "ownerCount": 1, "ownersKnown": true, "groupGuests": []
+      },
+      "expect": [
+        { "id": "d4fa10e10d65fb6304ca2ed1", "check": "StaleOwnerless", "rule": "SiteSingleOwner", "severity": "Low", "objectType": "Site", "path": "", "principal": "", "principalLogin": "", "permission": "", "detail": "Only one owner" }
+      ]
+    },
+    {
+      "name": "A site changed exactly the stale number of days ago is not stale",
+      "staleDays": 180,
+      "facts": {
+        "isGroupConnected": false, "isPublicGroup": false, "sensitivityLabel": "General", "labelKnown": true,
+        "lastContentChange": "2026-04-04T12:00:00Z", "ownerCount": 2, "ownersKnown": true, "groupGuests": []
+      },
+      "expect": []
+    },
+    {
+      "name": "The stale limit can be changed per scan",
+      "staleDays": 30,
+      "facts": {
+        "isGroupConnected": false, "isPublicGroup": false, "sensitivityLabel": "General", "labelKnown": true,
+        "lastContentChange": "2026-08-01T09:30:00Z", "ownerCount": 2, "ownersKnown": true, "groupGuests": []
+      },
+      "expect": [
+        { "id": "53f43950b257a63ee5fd7f08", "check": "StaleOwnerless", "rule": "SiteStale", "severity": "Medium", "objectType": "Site", "path": "", "principal": "", "principalLogin": "", "permission": "", "detail": "No content changed since 2026-08-01" }
+      ]
+    },
+    {
+      "name": "No last change date means not stale",
+      "staleDays": 180,
+      "facts": {
+        "isGroupConnected": false, "isPublicGroup": false, "sensitivityLabel": "General", "labelKnown": true,
+        "lastContentChange": null, "ownerCount": 3, "ownersKnown": true, "groupGuests": []
+      },
+      "expect": []
+    }
+  ],
+
+  "libraryTotals": [
+    { "name": "No items with their own permissions", "rule": "BrokenInheritance", "path": "/sites/finance/Docs", "count": 0, "files": 50, "expect": null },
+    { "name": "Items with their own permissions", "rule": "BrokenInheritance", "path": "/sites/finance/Docs", "count": 340, "files": 900,
+      "expect": { "id": "83fdd695148e319872c42495", "check": "Oversharing", "rule": "BrokenInheritance", "severity": "Low", "objectType": "Library", "path": "/sites/finance/Docs", "principal": "", "principalLogin": "", "permission": "", "detail": "340 items have their own permissions" } },
+    { "name": "Every file labelled", "rule": "FilesUnlabeled", "path": "/sites/finance/Docs", "count": 0, "files": 50, "expect": null },
+    { "name": "Some files unlabelled", "rule": "FilesUnlabeled", "path": "/sites/finance/Docs", "count": 12, "files": 50,
+      "expect": { "id": "f231fbb2c157fa6c5810d9c0", "check": "SensitivityLabels", "rule": "FilesUnlabeled", "severity": "Low", "objectType": "Library", "path": "/sites/finance/Docs", "principal": "", "principalLogin": "", "permission": "", "detail": "12 of 50 files have no sensitivity label" } },
+    { "name": "One item with its own permissions", "rule": "BrokenInheritance", "path": "/sites/finance/Docs", "count": 1, "files": 900,
+      "expect": { "id": "83fdd695148e319872c42495", "check": "Oversharing", "rule": "BrokenInheritance", "severity": "Low", "objectType": "Library", "path": "/sites/finance/Docs", "principal": "", "principalLogin": "", "permission": "", "detail": "1 item has its own permissions" } },
+    { "name": "One file unlabelled", "rule": "FilesUnlabeled", "path": "/sites/finance/Docs", "count": 1, "files": 50,
+      "expect": { "id": "f231fbb2c157fa6c5810d9c0", "check": "SensitivityLabels", "rule": "FilesUnlabeled", "severity": "Low", "objectType": "Library", "path": "/sites/finance/Docs", "principal": "", "principalLogin": "", "permission": "", "detail": "1 of 50 files has no sensitivity label" } },
+    { "name": "The only file unlabelled", "rule": "FilesUnlabeled", "path": "/sites/finance/Docs", "count": 1, "files": 1,
+      "expect": { "id": "f231fbb2c157fa6c5810d9c0", "check": "SensitivityLabels", "rule": "FilesUnlabeled", "severity": "Low", "objectType": "Library", "path": "/sites/finance/Docs", "principal": "", "principalLogin": "", "permission": "", "detail": "1 of 1 file has no sensitivity label" } }
+  ],
+
+  "siteScores": [
+    { "name": "No findings", "counts": { "High": 0, "Medium": 0, "Low": 0 }, "score": 100 },
+    { "name": "Each severity costs its penalty", "counts": { "High": 2, "Medium": 3, "Low": 4 }, "score": 51 },
+    { "name": "The score stops at the minimum", "counts": { "High": 12, "Medium": 0, "Low": 0 }, "score": 0 }
+  ],
+
+  "tenantScores": [
+    { "name": "No sites", "scores": [], "score": null },
+    { "name": "Average of the sites", "scores": [0, 100], "score": 50 },
+    { "name": "A half rounds down to even", "scores": [2, 3], "score": 2 },
+    { "name": "A half rounds up to even", "scores": [3, 4], "score": 4 },
+    { "name": "Otherwise to the nearest", "scores": [70, 71, 71], "score": 71 }
+  ],
+  "setAside": [
+    { "name": "The tenant app catalog is set aside", "webTemplate": "APPCATALOG", "expect": "AppCatalog" },
+    { "name": "Whatever the case of the template name", "webTemplate": "AppCatalog", "expect": "AppCatalog" },
+    { "name": "A team site is checked as usual", "webTemplate": "GROUP", "expect": null },
+    { "name": "A communication site is checked as usual", "webTemplate": "SITEPAGEPUBLISHING", "expect": null },
+    { "name": "A site whose template is not known is checked as usual", "webTemplate": null, "expect": null }
+  ]
+}

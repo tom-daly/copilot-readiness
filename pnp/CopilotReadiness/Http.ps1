@@ -191,34 +191,53 @@ function Update-CrPace {
     }
 }
 
+# Until when a refused certificate is worth waiting on: soon after it was added. Later than that,
+# a refusal means something is really wrong (say an admin removed it), so it isn't waited on.
+$script:CertificateWaitUntil = [DateTime]::MinValue
+$script:CertificateWaitOn = $true
+
+function Set-CrCertificateWait {
+    <# Off is for a caller that shows its own wait, as the setup screen does. #>
+    param([Parameter(Mandatory)] [bool] $On)
+    $script:CertificateWaitOn = $On
+}
+
 function Invoke-CrCertificateWait {
     <#
-      Runs Do, and if Microsoft doesn't recognise the certificate yet (AADSTS700027), waits and
+      Runs Do, and if Microsoft doesn't recognise a new certificate yet (AADSTS700027), waits and
       tries again. A new certificate can be accepted by some of Microsoft's servers and refused by
-      others for some minutes, so one that has just worked can still be refused. Other errors
-      go straight back to the caller.
+      others for some minutes, so one that has just worked can still be refused. Other errors go
+      straight back to the caller. Pressing Stop ends the wait within a second.
     #>
-    param([Parameter(Mandatory)] [scriptblock] $Do, [int] $Seconds = 1200, [int] $Every = 15, [scriptblock] $Sleep = { param($s) Start-Sleep -Seconds $s })
-    $until = [DateTime]::UtcNow.AddSeconds($Seconds)
+    param([Parameter(Mandatory)] [scriptblock] $Do, [Nullable[DateTime]] $Until, [int] $Every = 15, [scriptblock] $Sleep)
+    $limit = if ($Until) { $Until } else { $script:CertificateWaitUntil }
     $said = $false
-    while ($true) {
-        try { return & $Do }
-        catch {
-            if ($_.Exception.Message -notmatch 'AADSTS700027' -or [DateTime]::UtcNow -ge $until) { throw }
-            if (-not $said) { Write-Host "$(Get-Date -Format 'h:mm:ss tt')  Microsoft is still switching on this PC's certificate. Waiting; this is normal."; $said = $true }
-            & $Sleep $Every
+    $note = $script:Step
+    $before = if ($note) { $note.doing }
+    try {
+        while ($true) {
+            try { return & $Do }
+            catch {
+                if (-not $script:CertificateWaitOn -or $_.Exception.Message -notmatch 'AADSTS700027' -or [DateTime]::UtcNow -ge $limit) { throw }
+                if (-not $said) {
+                    Write-Host "$(Get-Date -Format 'h:mm:ss tt')  Microsoft isn't accepting this computer's new certificate yet. Waiting; this is normal."
+                    if ($note) { $note.doing = "Waiting for Microsoft to accept this computer's new certificate" }
+                    $said = $true
+                }
+                if ($Sleep) { & $Sleep $Every }
+                else { foreach ($second in 1..$Every) { Assert-CrNotStopped; Start-Sleep -Seconds 1 } }
+            }
         }
     }
+    finally { if ($said -and $note) { $note.doing = $before } }
 }
 
 function Connect-CrTenant {
-    <#
-      Signs in as the scanner app with the certificate in the Windows certificate store. Settings
-      come from settings.json. NoWait is for a caller that shows its own wait.
-    #>
-    param([Parameter(Mandatory)] $Settings, [switch] $NoWait)
-    $connect = { Connect-PnPOnline -Url $Settings.sharePointUrl -ClientId $Settings.app.clientId -Tenant $Settings.tenant -Thumbprint $Settings.app.thumbprint -ErrorAction Stop }
-    if ($NoWait) { & $connect } else { Invoke-CrCertificateWait $connect }
+    <# Signs in as the scanner app with the certificate in the Windows certificate store. Settings come from settings.json. #>
+    param([Parameter(Mandatory)] $Settings)
+    $added = [DateTimeOffset]::MinValue
+    $script:CertificateWaitUntil = if ([DateTimeOffset]::TryParse("$($Settings.app.createdAt)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$added)) { $added.UtcDateTime.AddMinutes(30) } else { [DateTime]::MinValue }
+    Invoke-CrCertificateWait { Connect-PnPOnline -Url $Settings.sharePointUrl -ClientId $Settings.app.clientId -Tenant $Settings.tenant -Thumbprint $Settings.app.thumbprint -ErrorAction Stop }
     $script:Tokens = @{}
 }
 

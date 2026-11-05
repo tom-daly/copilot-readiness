@@ -42,40 +42,83 @@ function Merge-CrKeyCredentials {
     , @(@($Existing) + $new)
 }
 
+function Remove-CrCertificateFromApp {
+    <# Takes one certificate off the app, leaving the rest. For a setup that failed after adding it. #>
+    param([Parameter(Mandatory)] [scriptblock] $Graph, [Parameter(Mandatory)] [string] $ObjectId, [Parameter(Mandatory)] [string] $Thumbprint)
+    $keys = @((& $Graph GET "applications/$ObjectId`?`$select=keyCredentials").keyCredentials)
+    $rest = @($keys | Where-Object { "$($_.customKeyIdentifier)" -ne $Thumbprint })
+    if ($rest.Count -eq $keys.Count) { return }
+    if (@($rest | Where-Object { -not $_.key }).Count) { return }
+    $null = & $Graph PATCH "applications/$ObjectId" ([pscustomobject]@{ keyCredentials = $rest })
+}
+
 function Add-CrCertificateToApp {
     <#
-      Finds the tenant's app by name and adds this PC's certificate to it. Returns AppId,
-      and Accepted: whether the app's permissions have been accepted in this tenant.
-      Graph is what New-CrAdminGraph returns.
+      Finds the tenant's app by name and adds this PC's certificate to it. Replace names a
+      certificate this PC is giving up, which comes off the app. Returns AppId, ObjectId and Accepted:
+      whether the app's permissions have been accepted ($null if that couldn't be found out).
+
+      Microsoft has no way to change the list only if nobody else just did, so two PCs joining
+      together could each overwrite the other. And right after a change it can answer with the old
+      list. So this reads the list back after a pause, and puts back anything that went missing,
+      until the list is right. Graph is what New-CrAdminGraph returns.
     #>
     param(
         [Parameter(Mandatory)] [scriptblock] $Graph,
         [Parameter(Mandatory)] [string] $AppName,
-        [Parameter(Mandatory)] [System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate
+        [Parameter(Mandatory)] [System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate,
+        [string] $Replace,
+        [int] $Checks = 6,
+        [scriptblock] $Sleep = { Start-Sleep -Seconds (Get-Random -Minimum 10 -Maximum 21) }
     )
     $filter = [uri]::EscapeDataString("displayName eq '$($AppName.Replace("'", "''"))'")
-    $apps = @((& $Graph GET "applications?`$filter=$filter&`$select=id,appId,displayName,keyCredentials").value)
+    $apps = @((& $Graph GET "applications?`$filter=$filter&`$select=id,appId,displayName").value)
     if ($apps.Count -eq 0) { throw "Microsoft said the app '$AppName' already exists, but it can't be found. Check you signed in as a Global Administrator, then start again." }
     if ($apps.Count -gt 1) {
         throw ("This tenant has $($apps.Count) apps called '$AppName', with these app IDs: $($apps.appId -join ', '). " +
             'In the Entra admin center, under App registrations, delete the ones nobody uses so that one is left, then start again.')
     }
     $found = $apps[0]
-    $before = @($found.keyCredentials)
-    $list = Merge-CrKeyCredentials -Existing $before -Certificate $Certificate
-    if ($list) {
-        $null = & $Graph PATCH "applications/$($found.id)" ([pscustomobject]@{ keyCredentials = $list })
-        # Make sure nothing was lost, so a PC already using this app isn't quietly locked out.
-        $after = @((& $Graph GET "applications/$($found.id)?`$select=keyCredentials").keyCredentials)
-        $missing = @($before | Where-Object { $after.keyId -notcontains $_.keyId })
-        if ($missing.Count -or $after.Count -ne $before.Count + 1) {
-            throw "After adding this PC's certificate, '$AppName' had $($after.Count) certificates instead of $($before.Count + 1). Check it in the Entra admin center under App registrations > Certificates & secrets."
+
+    # Every certificate seen on the app during this run, by thumbprint, with its key.
+    $known = [ordered]@{}
+    $wrote = $false
+    $right = $false
+    try {
+        foreach ($check in 1..$Checks) {
+            # Certificates' keys only come back when asking for one app by itself, not from a search.
+            $now = @((& $Graph GET "applications/$($found.id)?`$select=keyCredentials").keyCredentials)
+            foreach ($k in $now) { if ("$($k.customKeyIdentifier)" -ne $Replace) { $known["$($k.customKeyIdentifier)"] = $k } }
+            $here = @($now | ForEach-Object { "$($_.customKeyIdentifier)" })
+            $missing = @($known.Keys | Where-Object { $here -notcontains $_ })
+            $right = $here -contains $Certificate.Thumbprint -and -not $missing.Count -and -not ($Replace -and $here -contains $Replace)
+            # Once it looks right after a change, it has held through the pause.
+            if ($right) { break }
+            $list = Merge-CrKeyCredentials -Existing @($known.Values) -Certificate $Certificate
+            if (-not $list) { $list = @($known.Values) }
+            $wrote = $true
+            $null = & $Graph PATCH "applications/$($found.id)" ([pscustomobject]@{ keyCredentials = @($list) })
+            if ($check -lt $Checks) { & $Sleep }
+        }
+        if (-not $right) {
+            throw "Couldn't confirm this PC's certificate on '$AppName' after $Checks tries. Wait a few minutes and start again. If it keeps happening, check the app in the Entra admin center under App registrations > Certificates & secrets."
         }
     }
-    $principals = @((& $Graph GET "servicePrincipals?`$filter=appId eq '$($found.appId)'&`$select=id").value)
-    $accepted = $false
-    if ($principals.Count) { $accepted = @((& $Graph GET "servicePrincipals/$($principals[0].id)/appRoleAssignments").value).Count -gt 0 }
-    [pscustomobject]@{ AppId = "$($found.appId)"; Accepted = $accepted }
+    catch {
+        # Don't leave an entry nobody can use. If this fails too, the error above is still what matters.
+        if ($wrote) { try { Remove-CrCertificateFromApp -Graph $Graph -ObjectId $found.id -Thumbprint $Certificate.Thumbprint } catch { } }
+        throw
+    }
+
+    # The certificate is on. Not being able to read this next part is no reason to undo that: the sign-in that follows will tell.
+    $accepted = $null
+    try {
+        $principals = @((& $Graph GET "servicePrincipals?`$filter=appId eq '$($found.appId)'&`$select=id").value)
+        $accepted = $false
+        if ($principals.Count) { $accepted = @((& $Graph GET "servicePrincipals/$($principals[0].id)/appRoleAssignments").value).Count -gt 0 }
+    }
+    catch { $accepted = $null }
+    [pscustomobject]@{ AppId = "$($found.appId)"; ObjectId = "$($found.id)"; Accepted = $accepted }
 }
 
 function Get-CrAppCertificates {
@@ -87,11 +130,12 @@ function Get-CrAppCertificates {
 function Remove-CrSetupLeftovers {
     <#
       After setup, whether it worked or not: removes the copies of the private key from the
-      certificate folder, and any certificate made during this run that nothing uses.
+      certificate folder, and any certificate made during this run that nothing uses, with its key.
     #>
     param([Parameter(Mandatory)] [string] $CertificateFolder, [Parameter(Mandatory)] [string] $AppName, [string[]] $CertificatesBefore = @(), [string] $Keep)
     if (Test-Path -LiteralPath $CertificateFolder) {
         Get-ChildItem -LiteralPath $CertificateFolder -File | Where-Object Extension -In '.pfx', '.cer' | Remove-Item -Force
     }
-    Get-CrAppCertificates $AppName | Where-Object { $CertificatesBefore -notcontains $_.Thumbprint -and $_.Thumbprint -ne $Keep } | Remove-Item -Force
+    Get-CrAppCertificates $AppName | Where-Object { $CertificatesBefore -notcontains $_.Thumbprint -and $_.Thumbprint -ne $Keep } |
+        ForEach-Object { Remove-Item -LiteralPath $_.PSPath -DeleteKey -Force }
 }

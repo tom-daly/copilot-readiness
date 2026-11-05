@@ -42,6 +42,14 @@ try {
 
     # Links between pages become links within the one page. Each page's file name is also its heading's id.
     $docs = Join-Path $root 'docs'
+    # Don't ship a broken picture.
+    Add-Type -AssemblyName System.Drawing
+    foreach ($picture in Get-ChildItem -LiteralPath (Join-Path $docs 'pictures') -Filter '*.png') {
+        $image = [System.Drawing.Image]::FromFile($picture.FullName)
+        $width = $image.Width; $height = $image.Height
+        $image.Dispose()
+        if ($width -lt 400 -or $height -lt 100) { throw "$($picture.Name) is only $width by $height. Retake it with scripts/New-GuidePictures.ps1." }
+    }
     $pages = 'install', 'setting-it-up', 'running-the-scripts', 'the-reports', 'if-something-goes-wrong', 'more-detail'
     $contents = ($pages | ForEach-Object {
             $heading = (Get-Content -LiteralPath (Join-Path $docs "$_.md") -TotalCount 1 -Encoding utf8) -replace '^#\s*', ''

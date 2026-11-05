@@ -101,7 +101,13 @@ if ($RunScan) {
         Set-CrTenant $settings $scope.tenant
         Import-Module PnP.PowerShell -MinimumVersion (Get-CrPnPRequired)
         Write-Host "$(Get-Date -Format s) Signing in to $($settings.sharePointUrl)"
-        Connect-CrTenant $settings
+        # Stop works while it waits on a new certificate, as it does once the scan is going.
+        Set-CrStopFile (Join-Path $RunScan 'stop.request')
+        try { Connect-CrTenant $settings }
+        catch [System.OperationCanceledException] {
+            Set-CrProgressState $RunScan Cancelled
+            return
+        }
         Write-Host "$(Get-Date -Format s) Scanning $RunScan"
         Invoke-CrScan -Folder $RunScan -Settings $settings
         Write-Host "$(Get-Date -Format s) Finished"
@@ -220,7 +226,7 @@ if (-not $newApp -and -not (Test-Path -LiteralPath "Cert:\CurrentUser\My\$($app.
 if ($newApp) {
     Write-Host ''
     Write-Host "Setting up Copilot Readiness for $($settings.tenant) ($($settings.sharePointUrl))" -ForegroundColor Cyan
-    Write-Host 'Creating the app registration. A browser window will ask you to sign in as a Global Administrator, and then to accept the permissions.'
+    Write-Host 'Setting up the app registration. A browser window will ask you to sign in as a Global Administrator. The first time in a tenant, it also asks you to accept the permissions.'
     $certFolder = Join-Path $PSScriptRoot 'certificate'
     New-Item -ItemType Directory -Path $certFolder -Force | Out-Null
 
@@ -239,6 +245,11 @@ if ($newApp) {
 
     $certificatesBefore = @(Get-CrAppCertificates $app.name | ForEach-Object Thumbprint)
     $keep = $null
+    # Running setup again on a PC gives it a new certificate, so the old one is finished with.
+    $previous = if ($app.thumbprint -and (Test-Path -LiteralPath "Cert:\CurrentUser\My\$($app.thumbprint)")) { "$($app.thumbprint)" }
+    $joined = $null
+    $graph = $null
+    $certificate = $null
     try {
         $alreadyThere = $false
         $created = $null
@@ -250,19 +261,21 @@ if ($newApp) {
 
         if ($alreadyThere) {
             # Set up before on another PC: this PC joins that app, with the certificate PnP has just made here.
-            Write-Host "'$($app.name)' is already set up in this tenant, probably on another PC, so this PC will use it too." -ForegroundColor Cyan
-            Write-Host 'A browser window will ask you to sign in as a Global Administrator once more, so this PC can be added.'
+            Write-Host "Copilot Readiness is already registered in this tenant, but this computer doesn't have a certificate for it yet. Creating one now." -ForegroundColor Cyan
+            Write-Host 'A browser window will ask you to sign in as a Global Administrator once more, so the new certificate can be added.'
             $certificate = @(Get-CrAppCertificates $app.name | Where-Object { $certificatesBefore -notcontains $_.Thumbprint } | Sort-Object NotBefore -Descending) | Select-Object -First 1
             if (-not $certificate) { throw "The certificate for this PC wasn't made, so it can't be added to '$($app.name)'. Start again." }
             $graph = New-CrAdminGraph -Settings $settings -DeviceLogin:$DeviceLogin
-            $joined = Add-CrCertificateToApp -Graph $graph -AppName $app.name -Certificate $certificate
-            Write-Host "This PC now uses the app with ID $($joined.AppId)."
-            $switchingOn = "this PC's certificate"
+            $joined = Add-CrCertificateToApp -Graph $graph -AppName $app.name -Certificate $certificate -Replace $previous
+            Write-Host "Certificate added. This computer now uses the app with ID $($joined.AppId)."
+            $addingComputer = $true
             $app.clientId = $joined.AppId
             $app.thumbprint = $certificate.Thumbprint
-            if (-not $joined.Accepted) {
-                Write-Host "The app's permissions haven't been accepted yet. A browser window will ask you to accept them."
-                Start-Process "https://login.microsoftonline.com/$($settings.tenant)/adminconsent?client_id=$($joined.AppId)"
+            if ($joined.Accepted -eq $false) {
+                # The first setup stopped before its permissions were accepted.
+                $acceptAt = "https://login.microsoftonline.com/$($settings.tenant)/adminconsent?client_id=$($joined.AppId)"
+                Write-Host "The app's permissions haven't been accepted yet. A browser window asks a Global Administrator to accept them. If you don't see it, open: $acceptAt"
+                Start-Process $acceptAt
             }
         }
         else {
@@ -275,6 +288,17 @@ if ($newApp) {
         $keep = $app.thumbprint
         $app.createdAt = [DateTimeOffset]::UtcNow.ToString('o')
         Save-CrSettings $SettingsPath $settings
+        if ($previous -and $joined -and $previous -ne $keep) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$previous" -DeleteKey -Force -ErrorAction SilentlyContinue }
+    }
+    catch {
+        # This PC's copy of the certificate is about to go, so don't leave its entry on the app.
+        $wasKept = $keep
+        $keep = $null
+        if ($joined -and $graph -and $certificate) {
+            try { Remove-CrCertificateFromApp -Graph $graph -ObjectId $joined.ObjectId -Thumbprint $certificate.Thumbprint } catch { }
+        }
+        if ($wasKept) { $app.thumbprint = $previous }
+        throw
     }
     finally {
         # The certificate's private key now lives in your certificate store; don't leave a copy lying around.
@@ -290,7 +314,7 @@ Write-Host "Signing in to $($settings.sharePointUrl)..."
 $created = [DateTimeOffset]::MinValue
 $young = $newApp -or ([DateTimeOffset]::TryParse("$($app.createdAt)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$created) -and
     $created -gt [DateTimeOffset]::UtcNow.AddHours(-2))
-if (-not (Test-Path variable:switchingOn)) { $switchingOn = "the app's permissions" }
+$addingComputer = Test-Path variable:addingComputer
 # Microsoft's servers don't all accept something new at the same moment, so one good sign-in
 # doesn't mean it's ready. After a new setup, several in a row have to work.
 $needed = if ($newApp) { 3 } else { 1 }
@@ -298,9 +322,11 @@ $good = 0
 $waitSince = $null
 $told = $false
 $giveUpAt = [DateTime]::UtcNow.AddMinutes($(if ($young) { 20 } else { 0 }))
+# This screen does its own waiting and counting down. Each pass below is one quick try.
+Set-CrCertificateWait $false
 while ($true) {
     try {
-        Connect-CrTenant $settings -NoWait
+        Connect-CrTenant $settings
         $null = Invoke-CrGraph 'sites/getAllSites?$select=id&$top=1'
         $null = Invoke-CrGet "$($settings.sharePointUrl)/_api/web/RoleAssignments?`$top=1"
         $good++
@@ -322,18 +348,24 @@ while ($true) {
     }
     # Normal for a new app or certificate: say so in plain words. The technical error stays in the log.
     if (-not $waitSince) { $waitSince = [DateTime]::UtcNow }
-    $headline = if ($good) { "Almost there. Microsoft is finishing switching on $switchingOn." } else { "Nothing is wrong. Microsoft is switching on $switchingOn." }
+    $mustAccept = (Test-Path variable:acceptAt) -and -not $good
+    $headline = if ($mustAccept) { 'Please press Accept in your browser.' }
+    elseif ($addingComputer) { if ($good) { 'Almost done. Checking the new certificate works.' } else { "Adding this computer's new certificate." } }
+    elseif ($good) { "Almost done. Microsoft is finishing switching on the app's permissions." }
+    else { "Nothing is wrong. Microsoft is switching on the app's permissions." }
+    $why = if ($mustAccept) { "A Global Administrator needs to accept this app's permissions. If you don't see the page, check your other browser windows; its address is in the box below. This keeps checking by itself, for up to 20 minutes." }
+    elseif ($addingComputer) { "Copilot Readiness is already registered in this tenant, but this computer didn't have a certificate for it, so one was created. Microsoft takes a few minutes to start accepting it, and sometimes up to 20. You don't need to do anything." }
+    else { "This is normal. It usually takes a few minutes and can take up to 20. You don't need to do anything, and this keeps trying by itself." }
     if ($script:activity) {
-        if (-not $told) { Write-Host "Waiting for Microsoft to switch on $switchingOn. This is normal."; $told = $true }
-        Set-CrActivityWait $script:activity -Title $headline `
-            -Why "This is normal. It usually takes a few minutes and can take up to 20. You don't need to do anything, and this keeps trying by itself." `
-            -Since $waitSince -Until ([DateTime]::UtcNow.AddSeconds($pause))
+        if (-not $told) { Write-Host 'Waiting for Microsoft.'; $told = $true }
+        Set-CrActivityWait $script:activity -Title $headline -Why $why -Since $waitSince -Until ([DateTime]::UtcNow.AddSeconds($pause))
     }
     else {
         Write-Host ("  {0:h:mm:ss tt}  $headline This is normal, and can take up to 20 minutes. Trying again in $pause seconds." -f (Get-Date))
     }
     Start-Sleep -Seconds $pause
 }
+Set-CrCertificateWait $true
 Set-CrActivityWait $script:activity
 if ($newApp) { Write-Host 'Setup done. This PC is ready to scan.' -ForegroundColor Green }
 

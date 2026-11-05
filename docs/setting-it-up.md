@@ -53,13 +53,13 @@ From PowerShell, `./Start.ps1 -Tenant fabrikam` switches straight to that tenant
 
 ## Another PC
 
-Your tenant only needs one app, and each PC gets its own certificate for it. To scan from a second PC:
+Your tenant only needs one app, and each computer gets its own certificate for it. When you set up a second computer, the window tells you the app is already registered but this computer has no certificate yet, so it creates one and adds it. To scan from a second computer:
 
 1. [Install](install.md) on that PC, then double-click **Start.cmd** and type the same tenant name.
 2. Sign in as a **Global Administrator**. You'll be asked twice: once to check the tenant, and once to add this PC.
-3. Wait for the blue box to finish. This took a minute or two in our tests, and can take longer. Microsoft took about six minutes to fully settle, so a scan started straight away may pause by itself for a while. That is normal.
+3. Wait for the blue box to finish. This took a minute or two in our tests, and can take longer. Microsoft can take about six minutes to always accept a new certificate, so a scan started straight away may pause by itself for a while. That is normal.
 
-There's no **Accept** page this time, because the app's permissions were already accepted. Your other PCs keep working.
+There's normally no **Accept** page this time, because the app's permissions were already accepted. If the first setup stopped before they were, the window asks you to press **Accept**. Your other PCs keep working.
 
 Each PC keeps its own settings and scan results. If two PCs scan the same tenant at the same time, they share one allowance from Microsoft, so use **Normal** or **Gentle** pace.
 

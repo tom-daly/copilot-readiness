@@ -13,16 +13,17 @@ function Select-CrActivityLines {
     #>
     param([string[]] $Lines = @(), [Parameter(Mandatory)] [hashtable] $Read)
     $skip = '^(\*{10,}|PowerShell transcript (start|end)|Start time:|End time:|Username:|RunAs User:|Configuration Name:|Machine:|Host Application:|Process ID:|PS\w*Version:|PSEdition:|PSCompatibleVersions:|GitCommitId:|OS:|Platform:|BuildVersion:|CLRVersion:|WSManStackVersion:|SerializationVersion:|Transcript started)'
+    $technical = 'AADSTS\d+|Trace ID:|Correlation ID:|client assertion'
     foreach ($line in $Lines) {
-        if ($Read.InError) {
-            if ($line.TrimEnd().EndsWith('"')) { $Read.InError = $false }
+        $starts = $line -match '^(PS>|>> )?TerminatingError\('
+        if ($Read.InError -or $starts) {
+            if ($starts) { $Read.Depth = 0 }
+            # Microsoft's errors can be JSON over several lines, where a line in the middle ends in a quote too.
+            $Read.Depth += ([regex]::Matches($line, '[{\[]').Count - [regex]::Matches($line, '[}\]]').Count)
+            $Read.InError = -not ($line.TrimEnd().EndsWith('"') -and $Read.Depth -le 0)
             continue
         }
-        if ($line -match '^(PS>|>> )?TerminatingError\(') {
-            if (-not $line.TrimEnd().EndsWith('"')) { $Read.InError = $true }
-            continue
-        }
-        if ($line -notmatch $skip) { $line }
+        if ($line -notmatch $skip -and $line -notmatch $technical) { $line }
     }
 }
 
@@ -58,13 +59,21 @@ $script:ActivityWindowScript = {
     $close = [System.Windows.Forms.Button]@{ Text = 'Close'; AutoSize = $true; Padding = [System.Windows.Forms.Padding]::new(12, 3, 12, 3); Anchor = 'Right'; Visible = $false; Margin = [System.Windows.Forms.Padding]::new(0, 8, 0, 0) }
     $close.Add_Click({ $form.Close() })
     # Shown only while waiting on Microsoft.
-    $wait = [System.Windows.Forms.Panel]@{ AutoSize = $true; AutoSizeMode = 'GrowAndShrink'; Dock = 'Fill'; Visible = $false; BackColor = [System.Drawing.Color]::FromArgb(232, 242, 252); Padding = [System.Windows.Forms.Padding]::new(14, 10, 14, 10); Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 10) }
-    $waitFlow = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; AutoSizeMode = 'GrowAndShrink'; FlowDirection = 'TopDown'; WrapContents = $false; Dock = 'Top' }
+    $wait = [System.Windows.Forms.TableLayoutPanel]@{ AutoSize = $true; AutoSizeMode = 'GrowAndShrink'; ColumnCount = 1; Dock = 'Top'; Visible = $false; BackColor = [System.Drawing.Color]::FromArgb(232, 242, 252); Padding = [System.Windows.Forms.Padding]::new(14, 10, 14, 10); Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 10) }
+    $null = $wait.ColumnStyles.Add([System.Windows.Forms.ColumnStyle]::new('Percent', 100))
     $waitTitle = [System.Windows.Forms.Label]@{ Font = [System.Drawing.Font]::new('Segoe UI Semibold', 12); AutoSize = $true; Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 2) }
     $waitWhy = [System.Windows.Forms.Label]@{ AutoSize = $true; Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 6) }
     $waitCount = [System.Windows.Forms.Label]@{ Font = [System.Drawing.Font]::new('Segoe UI Semibold', 11); AutoSize = $true; Margin = [System.Windows.Forms.Padding]::new(0) }
-    $waitFlow.Controls.AddRange(@($waitTitle, $waitWhy, $waitCount))
-    $wait.Controls.Add($waitFlow)
+    foreach ($label in $waitTitle, $waitWhy, $waitCount) {
+        $null = $wait.RowStyles.Add([System.Windows.Forms.RowStyle]::new('AutoSize'))
+        $wait.Controls.Add($label)
+    }
+    # Long wording wraps inside the box, and the box grows to fit it.
+    $fitWait = {
+        $width = [Math]::Max(200, $layout.ClientSize.Width - $layout.Padding.Horizontal - $wait.Padding.Horizontal)
+        foreach ($label in $waitTitle, $waitWhy, $waitCount) { $label.MaximumSize = [System.Drawing.Size]::new($width, 0) }
+    }
+    $form.Add_Resize($fitWait)
     $layout.Controls.AddRange(@($heading, $note, $wait, $box, $close))
 
     # This window runs apart from the module, so it is handed the function's text.
@@ -75,7 +84,7 @@ $script:ActivityWindowScript = {
         $parts = @(if ($m) { "$m $(if ($m -eq 1) { 'minute' } else { 'minutes' })" }; if ($r -or -not $m) { "$r $(if ($r -eq 1) { 'second' } else { 'seconds' })" })
         $parts -join ' '
     }
-    $read = @{ Position = 0L; Shown = $false; InError = $false }
+    $read = @{ Position = 0L; Shown = $false; InError = $false; Depth = 0 }
     $timer = [System.Windows.Forms.Timer]@{ Interval = 500 }
     $timer.Add_Tick({
             try {
@@ -99,7 +108,7 @@ $script:ActivityWindowScript = {
                 $left = ($waiting.Until - $now).TotalSeconds
                 $so = Say-Span ($now - $waiting.Since).TotalSeconds
                 $waitCount.Text = if ($left -ge 1) { "Trying again in $(Say-Span $left). Waiting for $so so far." } else { "Checking now. Waiting for $so so far." }
-                if (-not $wait.Visible) { $wait.Visible = $true }
+                if (-not $wait.Visible) { & $fitWait; $wait.Visible = $true }
             }
             elseif ($wait.Visible) { $wait.Visible = $false }
             if ($State.Problem -and -not $read.Shown) {

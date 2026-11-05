@@ -1349,6 +1349,7 @@ function Invoke-CrScan {
                                     Import-Module PnP.PowerShell -MinimumVersion (Get-CrPnPRequired)
                                     Connect-CrTenant $settings
                                 }
+                                catch [System.OperationCanceledException] { $null = $current.TryRemove($n, [ref]$null); break }
                                 catch { $null = $current.TryRemove($n, [ref]$null); throw }
                                 $signedIn = $true
                             }

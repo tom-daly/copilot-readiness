@@ -93,11 +93,14 @@ function Save-Window([IntPtr] $Handle, [string] $Name, [System.Drawing.Rectangle
     $pen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(220, 30, 30), 3)
     foreach ($m in $Marks) { $g.DrawRectangle($pen, $m.Left - $area.Left - 5, $m.Top - $area.Top - 5, $m.Width + 10, $m.Height + 10) }
     $g.Dispose(); $full.Dispose()
+    if ($image.Width -lt 400 -or $image.Height -lt 100) { throw "$Name came out $($image.Width) by $($image.Height), too small to be right. Run this again and leave the windows alone." }
     $image.Save((Join-Path $OutFolder $Name), [System.Drawing.Imaging.ImageFormat]::Png)
     $image.Dispose()
     Write-Host "  $Name"
 }
 function Save-Form($Form, [string] $Name, [object[]] $Mark = @()) {
+    # Anything that minimises the window while this runs would otherwise give a picture of just its title bar.
+    if ($Form.WindowState -eq 'Minimized') { $Form.WindowState = 'Normal'; Pump 1200 }
     Pump 400
     $marks = @($Mark | Where-Object { $_ } | ForEach-Object { $_.Parent.RectangleToScreen($_.Bounds) })
     Save-Window $Form.Handle $Name $marks
@@ -244,9 +247,9 @@ try {
     $log = Join-Path $work 'activity.log'
     Set-Content $log @(
         "Setting up Copilot Readiness for $tenant ($sharePoint)"
-        'Creating the app registration. A browser window will ask you to sign in as a Global Administrator, and then to accept the permissions.'
+        'Setting up the app registration. A browser window will ask you to sign in as a Global Administrator. The first time in a tenant, it also asks you to accept the permissions.'
         "Signing in to $sharePoint..."
-        "Waiting for Microsoft to switch on the app's permissions. This is normal."
+        'Waiting for Microsoft.'
     )
     $activity = Start-CrActivityWindow -LogPath $log -Title 'Getting contoso ready'
     Set-CrActivityWait $activity -Title "Nothing is wrong. Microsoft is switching on the app's permissions." `

@@ -170,6 +170,18 @@ try {
     Check 'who a Specific people link is for' ($byId['l-people-old'].sharedWith -eq 'raj@tailspin.com')
     Check 'full address and place' ($byId['l-org-old'].url -eq "$sp/sites/finance/Shared Documents/budget.xlsx" -and $byId['l-org-old'].place -eq 'Team' -and $byId['l-od-old'].place -eq 'OneDrive')
     Check 'the locked site is reported, not fatal' (@($preview.problems).Count -eq 1 -and $preview.problems[0].site -eq $locked)
+
+    # ── Progress while one big site is read ──
+    Check 'the counts for the site being read are cleared when it finishes' ([int]$p.itemsRead -eq 0 -and [int]$p.itemsTotal -eq 0 -and [int]$p.siteLinks -eq 0)
+    $live = @{}
+    $seen = [System.Collections.Generic.List[int]]::new()
+    $finSite = @($sites | Where-Object url -eq $fin)[0]
+    $read = Get-CrSiteLinkInventory -Site $finSite -OnItem { $seen.Add([int]$live.itemsRead) }.GetNewClosure() -Live $live
+    Check "files read, out of how many ($($live.itemsRead) of $($live.itemsTotal))" ($live.itemsTotal -eq 4 -and $live.itemsRead -eq 4)
+    Check "files with their own sharing ($($live.itemsShared))" ($live.itemsShared -eq 3)
+    Check "links counted as they are found ($($live.siteLinks) of $(@($read.Links).Count))" ($live.siteLinks -eq @($read.Links).Count -and $live.siteLinks -gt 0)
+    Check "progress is reported as it goes, and after a page ($($seen -join ','))" ($seen.Count -ge 4 -and $seen[0] -lt $seen[-1] -and $seen[-1] -eq 4)
+
     Check 'progress counts' ($p.found -eq 8 -and $p.toRemove -eq 5)
     $latest = Get-CrLatestFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com'
     Check 'a finished preview comes back when the window opens' ($latest.Folder -eq $folder -and $latest.Previewed -and -not $latest.Running -and $latest.Step -eq 'Preview' -and $latest.PreviewedAt)

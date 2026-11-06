@@ -534,11 +534,24 @@ function Add-CrRemediationTab {
             }
             $bar.Visible = $true
             $total = [Math]::Max(1, [int]$p.total)
-            $bar.Maximum = $total
-            $bar.Value = [Math]::Min($total, [int]$p.done)
+            if ($p.step -eq 'Preview') {
+                # In hundredths of a site, so the bar moves while one big site is read.
+                $read = [int]$p.itemsRead
+                $expected = [Math]::Max($read, [int]$p.itemsTotal)
+                $bar.Maximum = $total * 100
+                $part = if ($expected -gt 0) { [Math]::Floor(100.0 * $read / $expected) } else { 0 }
+                $bar.Value = [Math]::Min($total * 100, [int]$p.done * 100 + [int]$part)
+            }
+            else {
+                $bar.Maximum = $total
+                $bar.Value = [Math]::Min($total, [int]$p.done)
+            }
             $at = if ($p.pace) { " At the $((Get-CrPace $p.pace).Name) pace." } else { '' }
             $status.Text = if ($p.state -eq 'Starting') { 'Signing in...' }
-            elseif ($p.step -eq 'Preview') { ('Checking {0} ({1:N0} of {2:N0} sites). {3:N0} link(s) found so far, {4:N0} to remove. Nothing is being changed.' -f $p.current, ([int]$p.done + 1), [int]$p.total, [int]$p.found, [int]$p.toRemove) + $at }
+            elseif ($p.step -eq 'Preview') {
+                $files = if ($expected -gt 0) { ' Read {0:N0} of {1:N0} files and folders, {2:N0} with their own sharing.' -f $read, $expected, [int]$p.itemsShared } else { '' }
+                ('Checking {0} ({1:N0} of {2:N0} sites).{3} {4:N0} link(s) found so far. Nothing is being changed.' -f $p.current, ([int]$p.done + 1), [int]$p.total, $files, ([int]$p.found + [int]$p.siteLinks)) + $at
+            }
             else { ('Removing links: {0:N0} of {1:N0} done.' -f [int]$p.done, [int]$p.total) + $at }
         }.GetNewClosure())
     $form.Add_FormClosed({ $timer.Stop(); $timer.Dispose() }.GetNewClosure())

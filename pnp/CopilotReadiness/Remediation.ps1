@@ -254,6 +254,10 @@ function Write-CrFixProgress {
             skipped          = [int]$Counts.skipped
             pace             = (Get-CrThrottle).Pace
             failed           = [int]$Counts.failed
+            itemsRead        = [int]$Counts.itemsRead
+            itemsTotal       = [int]$Counts.itemsTotal
+            itemsShared      = [int]$Counts.itemsShared
+            siteLinks        = [int]$Counts.siteLinks
             problems         = @($Problems)
             error            = $ErrorText
             updatedAt        = [DateTimeOffset]::UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -577,14 +581,16 @@ function Get-CrSiteLinkInventory {
       with a bookmark is brought up to date from its list of changes instead: only files and
       folders changed since are asked about, and the rest of its links are taken from Saved.
       A library whose changes can't be read is read in full. OnItem runs before each item is
-      asked about, so progress can be shown.
+      asked about and after each page, so progress can be shown. Live, if given, is kept up to
+      date as it goes: itemsTotal (how many it expects to read), itemsRead, itemsShared (those
+      with their own permissions) and siteLinks (links found on this site so far).
 
       Returns Links, Libraries (each library's bookmark for next time), Changed (how many files
       and folders were asked about again from the list of changes), Mode: Full, Changes (every
       library from its list of changes) or Mixed, and Resync: how many libraries Microsoft asked
       to be read in full again, which it does once a folder's sharing has changed.
     #>
-    param([Parameter(Mandatory)] $Site, $Saved, [scriptblock] $OnItem)
+    param([Parameter(Mandatory)] $Site, $Saved, [scriptblock] $OnItem, [hashtable] $Live = @{})
     $url = "$($Site.url)".TrimEnd('/')
     $origin = ([uri]$url).GetLeftPart([UriPartial]::Authority)
     $links = [System.Collections.Generic.List[object]]::new()
@@ -599,6 +605,14 @@ function Get-CrSiteLinkInventory {
         if (-not $savedByList.ContainsKey($k)) { $savedByList[$k] = [System.Collections.Generic.List[object]]::new() }
         $savedByList[$k].Add($old)
     }
+    $Live.itemsRead = 0; $Live.itemsShared = 0; $Live.siteLinks = 0
+    # What will be read in full is known now. A library read from its list of changes adds what changed, once that's known.
+    $Live.itemsTotal = 0
+    foreach ($list in $lists) {
+        if ([int]$list.BaseType -notin 0, 1) { continue }
+        $isChanges = [int]$list.BaseType -eq 1 -and $Saved -and $Saved.libraries -and $Saved.libraries.PSObject.Properties["$($list.Id)"] -and $Saved.libraries."$($list.Id)".deltaLink
+        if (-not $isChanges) { $Live.itemsTotal += [Math]::Max(0, [int]$list.ItemCount) }
+    }
     foreach ($list in $lists) {
         if ([int]$list.BaseType -notin 0, 1) { continue }
         $listId = "$($list.Id)"
@@ -606,11 +620,15 @@ function Get-CrSiteLinkInventory {
         $prior = if ($Saved -and $Saved.libraries -and $Saved.libraries.PSObject.Properties[$listId]) { $Saved.libraries.$listId }
 
         if ($isLibrary -and $prior -and $prior.deltaLink) {
+            # What this library has added to the counts, taken back if it has to be read in full after all.
+            $here = @{ Total = 0; Read = 0; Shared = 0; Links = 0 }
             try {
                 $changes = Get-CrLibraryChanges "$($prior.deltaLink)"
                 # By item number; the library's own top folder has none and carries no links.
                 $touched = [ordered]@{}
                 foreach ($it in $changes.Items) { $n = "$($it.sharepointIds.listItemId)"; if ($n) { $touched[$n] = $it } }
+                $here.Total = $touched.Count
+                $Live.itemsTotal += $here.Total
                 $kept = @(foreach ($old in @($savedByList[$listId])) { if ($old -and -not $touched.Contains("$($old.itemId)")) { $old } })
                 # Microsoft's list doesn't always say which item a deleted file was, so the files whose links
                 # are carried over are checked to still be there: a few dozen to a request.
@@ -625,7 +643,10 @@ function Get-CrSiteLinkInventory {
                 }
                 $fresh = [System.Collections.Generic.List[object]]::new()
                 foreach ($old in $kept) { if ($alive.Contains("$($old.itemId)")) { $fresh.Add($old) } }
+                $here.Links = $fresh.Count
+                $Live.siteLinks += $fresh.Count
                 foreach ($n in $touched.Keys) {
+                    $here.Read++; $Live.itemsRead++
                     if ($OnItem) { & $OnItem }
                     # Where it is now (it may have moved), and whether it still has its own permissions.
                     try { $item = Invoke-CrGet "$url/_api/web/lists(guid'$listId')/items($n)?`$select=Id,FileRef,FSObjType,HasUniqueRoleAssignments" }
@@ -634,7 +655,11 @@ function Get-CrSiteLinkInventory {
                         throw
                     }
                     if (-not $item.HasUniqueRoleAssignments) { continue }
-                    foreach ($r in Get-CrItemLinkRecords -Site $Site -ListId $listId -ItemId ([int]$n) -Url "$origin$($item.FileRef)" -IsFolder ([int]$item.FSObjType -eq 1)) { $fresh.Add($r) }
+                    $here.Shared++; $Live.itemsShared++
+                    foreach ($r in Get-CrItemLinkRecords -Site $Site -ListId $listId -ItemId ([int]$n) -Url "$origin$($item.FileRef)" -IsFolder ([int]$item.FSObjType -eq 1)) {
+                        $fresh.Add($r)
+                        $here.Links++; $Live.siteLinks++
+                    }
                 }
                 $links.AddRange([object[]]$fresh.ToArray())
                 $bookmarks[$listId] = [pscustomobject]@{ driveId = "$($prior.driveId)"; deltaLink = $changes.DeltaLink }
@@ -648,6 +673,10 @@ function Get-CrSiteLinkInventory {
                 # (a folder's sharing reaches everything in it); anything else is a real problem.
                 if ((Get-CrStatus $_) -eq 410) { $tally.Resync++ }
                 Write-Host "$(Get-Date -Format s) Couldn't read the changes to '$($list.Title)' on $url, so reading all of it: $($_.Exception.Message)"
+                $Live.itemsTotal += [Math]::Max(0, [int]$list.ItemCount) - $here.Total
+                $Live.itemsRead -= $here.Read
+                $Live.itemsShared -= $here.Shared
+                $Live.siteLinks -= $here.Links
             }
         }
 
@@ -669,10 +698,17 @@ function Get-CrSiteLinkInventory {
         while ($next) {
             $page = Get-CrPage $next
             foreach ($item in $page.Items) {
+                $Live.itemsRead++
                 if (-not $item.HasUniqueRoleAssignments) { continue }
+                $Live.itemsShared++
                 if ($OnItem) { & $OnItem }
-                foreach ($r in Get-CrItemLinkRecords -Site $Site -ListId $listId -ItemId ([int]$item.Id) -Url "$origin$($item.FileRef)" -IsFolder ([int]$item.FSObjType -eq 1)) { $links.Add($r) }
+                foreach ($r in Get-CrItemLinkRecords -Site $Site -ListId $listId -ItemId ([int]$item.Id) -Url "$origin$($item.FileRef)" -IsFolder ([int]$item.FSObjType -eq 1)) {
+                    $links.Add($r)
+                    $Live.siteLinks++
+                }
             }
+            # A page with nothing shared on it still counts as progress.
+            if ($OnItem) { & $OnItem }
             $next = $page.Next
         }
     }
@@ -750,6 +786,8 @@ function Invoke-CrLinkPreview {
     try {
         foreach ($site in $sites) {
             $at.Current = if ($site.title) { "$($site.title)" } else { "$($site.url)" }
+            # The counts for the site being read start again for each site.
+            $counts.itemsRead = 0; $counts.itemsTotal = 0; $counts.itemsShared = 0; $counts.siteLinks = 0
             & $report
             Write-Host "$(Get-Date -Format s) Checking $($site.url)"
             try {
@@ -760,7 +798,7 @@ function Invoke-CrLinkPreview {
                     # Kept by an earlier version, holding less about each link: read the site in full this once.
                     if ($saved -and [int]$saved.version -lt $script:LinkCacheVersion) { $saved = $null }
                 }
-                $found = Get-CrSiteLinkInventory -Site $site -Saved $saved -OnItem $onItem
+                $found = Get-CrSiteLinkInventory -Site $site -Saved $saved -OnItem $onItem -Live $counts
                 # Kept only once the whole site is done, so a stopped preview never leaves half a site behind.
                 New-Item -ItemType Directory -Path (Split-Path $cacheFile) -Force | Out-Null
                 Write-CrJson $cacheFile ([pscustomobject][ordered]@{
@@ -790,6 +828,8 @@ function Invoke-CrLinkPreview {
                 Write-Host "$(Get-Date -Format s) Couldn't check $($site.url): $($_.Exception.Message)"
                 $problems.Add([pscustomobject]@{ site = "$($site.url)"; title = "$($site.title)"; error = $_.Exception.Message })
             }
+            # Its links are in the totals now, or it failed and they aren't going to be.
+            $counts.itemsRead = 0; $counts.itemsTotal = 0; $counts.itemsShared = 0; $counts.siteLinks = 0
             $at.Done++
         }
     }

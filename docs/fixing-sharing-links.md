@@ -40,6 +40,8 @@ In the list:
 
 **The next preview of a site is quicker.** The first preview of a site reads every file. After that, Copilot Readiness asks Microsoft what has changed since, including sharing changes anyone has made, and checks only those files. The site list shows when each site was last checked, and the line under it says what the next preview will do. When a folder's sharing has changed, Microsoft asks for the whole library to be read again, and it is. Tick **Check every file again** to read everything anyway.
 
+While it runs, the bar and the line beside it show how many files and folders have been read, how many have their own sharing and how many links have been found so far. The list itself appears when the preview finishes. A big OneDrive can take a long time the first time.
+
 ## Remove
 
 Press **Remove**. It says how many links will go, from how many sites, and asks you to confirm. It then removes exactly the links you left ticked in the preview, and nothing else. Each file is checked again first, so a link someone already removed is counted as already gone.

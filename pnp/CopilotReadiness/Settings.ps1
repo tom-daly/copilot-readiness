@@ -86,14 +86,17 @@ function Get-CrKeptCopy {
       MaxAgeDays (0: until -Refresh); otherwise Read runs and its answer is saved. If Read fails
       and there is a saved copy, that copy is used however old, with Problem saying why; with no
       saved copy, the error is thrown. Returns Value (as Read gave it, or as saved), ReadAt and Problem.
+      OldKey names where an earlier version of this app kept the value in the file, so copies saved
+      then still count. A fresh answer that can't be saved is still used.
     #>
-    param([Parameter(Mandatory)] [string] $Path, [Parameter(Mandatory)] [scriptblock] $Read, [int] $MaxAgeDays = 0, [switch] $Refresh)
+    param([Parameter(Mandatory)] [string] $Path, [Parameter(Mandatory)] [scriptblock] $Read, [int] $MaxAgeDays = 0, [switch] $Refresh, [string] $OldKey)
     $saved = $null
     if (Test-Path -LiteralPath $Path) {
         try {
             $file = Read-CrJson $Path
-            if ($null -ne $file.value) {
-                $saved = [pscustomobject]@{ Value = $file.value; ReadAt = [DateTimeOffset]::Parse($file.readAt, [Globalization.CultureInfo]::InvariantCulture); Problem = $null }
+            $value = if ($null -ne $file.value) { $file.value } elseif ($OldKey -and $file.PSObject.Properties[$OldKey]) { $file.$OldKey }
+            if ($null -ne $value) {
+                $saved = [pscustomobject]@{ Value = $value; ReadAt = [DateTimeOffset]::Parse($file.readAt, [Globalization.CultureInfo]::InvariantCulture); Problem = $null }
             }
         }
         catch { $saved = $null }   # a copy that can't be read is read again
@@ -105,8 +108,11 @@ function Get-CrKeptCopy {
         throw
     }
     $now = [DateTimeOffset]::UtcNow
-    New-Item -ItemType Directory -Path (Split-Path $Path) -Force | Out-Null
-    Write-CrJson $Path ([pscustomobject][ordered]@{ readAt = $now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); value = $value })
+    try {
+        New-Item -ItemType Directory -Path (Split-Path $Path) -Force | Out-Null
+        Write-CrJson $Path ([pscustomobject][ordered]@{ readAt = $now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); value = $value })
+    }
+    catch { Write-Host "Couldn't save $([System.IO.Path]::GetFileName($Path)) (it will be read again next time): $($_.Exception.Message)" }
     [pscustomobject]@{ Value = $value; ReadAt = $now; Problem = $null }
 }
 

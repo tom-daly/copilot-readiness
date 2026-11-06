@@ -63,7 +63,7 @@ function Get-CrSavedTenantSettings {
     param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ResultsRoot, [switch] $Refresh)
     $path = Get-CrTenantSettingsPath $ResultsRoot $Settings.tenant
     try {
-        $kept = Get-CrKeptCopy -Path $path -Refresh:$Refresh -Read { ConvertTo-CrPlainSettings (Read-CrTenantSettings $Settings) }
+        $kept = Get-CrKeptCopy -Path $path -Refresh:$Refresh -OldKey 'values' -Read { ConvertTo-CrPlainSettings (Read-CrTenantSettings $Settings) }
         [pscustomobject]@{ View = Get-CrTenantSettingsView (ConvertTo-CrDictionary $kept.Value) -SharePointUrl $Settings.sharePointUrl; ReadAt = $kept.ReadAt; Problem = $kept.Problem }
     }
     catch { [pscustomobject]@{ View = $_.Exception.Message; ReadAt = $null; Problem = $null } }

@@ -315,7 +315,7 @@ try {
     $lr = @((Read-CrJson (Join-Path $lost 'removed.json')).links | Where-Object shareId -EQ 'l-lost')
     Check "a lost answer is checked, not counted as failed ($($lr.result))" ($lr.Count -eq 1 -and $lr[0].result -eq 'Removed')
 
-    # The same, but Stop is pressed before it can check: written down as not known, never as not removed.
+    # The same, but Stop is pressed at that moment: it still looks (so the record is definite), then stops.
     $fake.Links["$od|D1|7"] = @((Link 'l-lost' 2 1 $old), (Link 'l-after' 2 1 $old))
     [void]$fake.Gone.Remove('l-lost')
     $fake.StopOnLost = $true
@@ -323,7 +323,7 @@ try {
     Invoke-CrFix -Folder $lost2 -Step Preview
     Invoke-CrFix -Folder $lost2 -Step Remove
     $l2 = @{}; foreach ($x in (Read-CrJson (Join-Path $lost2 'removed.json')).links) { $l2[$x.shareId] = $x.result }
-    Check "stopped while checking: not known, and the rest not reached ($($l2['l-lost']) / $($l2['l-after']))" ($l2['l-lost'] -like 'Not known*' -and $l2['l-after'] -like 'Not removed: it stopped*' -and (Read-CrProgress $lost2).state -eq 'Cancelled')
+    Check "Stop during the look: still checked and found removed, the rest not reached ($($l2['l-lost']) / $($l2['l-after']))" ($l2['l-lost'] -eq 'Removed' -and $l2['l-after'] -like 'Not removed: it stopped*' -and (Read-CrProgress $lost2).state -eq 'Cancelled')
     $fake.StopOnLost = $false
     $fake.Lost = $null
 
@@ -367,6 +367,18 @@ try {
     & $module { function script:Read-CrTeamsMarks { throw 'The admin center is unreachable.' } }
     $m3 = Get-CrTeamsMarks -Settings $tenantSettings -ResultsRoot $work -Refresh
     Check 'a refresh that fails keeps the list from before' ($m3['https://contoso.sharepoint.com/sites/finance'] -eq 'Team')
+    # A copy saved by the version before (its marks under "marks") still counts.
+    $oldPath = Join-Path $work 'teams-sites-fabrikam.onmicrosoft.com.json'
+    Set-Content -LiteralPath $oldPath -Value ('{"tenant":"fabrikam.onmicrosoft.com","readAt":"' + [DateTimeOffset]::UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") + '","marks":{"https://fabrikam.sharepoint.com/sites/hr":"Channel"}}')
+    $m4 = Get-CrTeamsMarks -Settings ([pscustomobject]@{ tenant = 'fabrikam.onmicrosoft.com' }) -ResultsRoot $work
+    Check "a copy saved the old way is still used ($($m4.Count) mark)" ($m4['https://fabrikam.sharepoint.com/sites/hr'] -eq 'Channel')
+    # A link cache from before "Shared with" counted everyone is read in full once.
+    $oldCache = Get-CrLinkCachePath -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -SiteUrl $od
+    $c = Read-CrJson $oldCache; $c.version = 1; Write-CrJson $oldCache $c
+    $fake.Calls.Clear()
+    $again = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options $wide180
+    Invoke-CrFix -Folder $again -Step Preview
+    Check 'an older link cache is read in full once' ([int](Read-CrJson (Join-Path $again 'preview.json')).checked.full -eq 1 -and [int](Read-CrJson $oldCache).version -eq 2)
     $marked = @([pscustomobject]@{ url = 'https://contoso.sharepoint.com/sites/Finance-Payroll'; kind = 'SharePoint' }, [pscustomobject]@{ url = 'https://contoso.sharepoint.com/sites/other'; kind = 'SharePoint' })
     Add-CrTeamsKinds $marked $m1
     Check 'marks match whatever the case of the address' ((Get-CrSitePlace $marked[0]) -eq 'Channel' -and (Get-CrSitePlace $marked[1]) -eq 'SharePoint')

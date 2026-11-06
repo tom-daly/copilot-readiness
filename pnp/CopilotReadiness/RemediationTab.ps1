@@ -164,6 +164,9 @@ function Add-CrRemediationTab {
     $clearAll = [System.Windows.Forms.LinkLabel]@{ Text = 'Clear'; AutoSize = $true; Margin = [System.Windows.Forms.Padding]::new(0, 2, 24, 0) }
     $chosenCount = [System.Windows.Forms.Label]@{ Text = ''; AutoSize = $true; Font = $Bold; Margin = [System.Windows.Forms.Padding]::new(0, 2, 0, 0) }
     $listFoot.Controls.AddRange(@($tickShown, $clearAll, $chosenCount))
+    # Said when more sites match than the list shows.
+    $moreSites = [System.Windows.Forms.Label]@{ AutoSize = $true; ForeColor = $Muted; Visible = $false; Margin = [System.Windows.Forms.Padding]::new(16, 2, 0, 0) }
+    $listFoot.Controls.Add($moreSites)
     # What the next preview will do on the chosen sites: only what changed on sites checked before, or read everything.
     $planNote = & $NewLabel '' $Font $Muted
     $planNote.Tag = 'half'
@@ -192,7 +195,7 @@ function Add-CrRemediationTab {
 
     # What the preview found, or what was removed.
     # After a preview, each link to remove has a tick box, ticked to start with.
-    $results = [System.Windows.Forms.ListView]@{ View = 'Details'; FullRowSelect = $true; CheckBoxes = $true; Dock = 'Fill'; Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 4) }
+    $results = [System.Windows.Forms.ListView]@{ View = 'Details'; FullRowSelect = $true; CheckBoxes = $true; VirtualMode = $true; Dock = 'Fill'; Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 4) }
     # Clicking a heading sorts by it; clicking it again turns the order round.
     $columnNames = @('What happens', 'Link', 'Access', 'Made on', 'Shared with', 'File or folder', 'Site')
     $columnWidths = @(270, 195, 60, 95, 180, 380, 160)
@@ -217,46 +220,64 @@ function Add-CrRemediationTab {
 
     # Ticks are kept by address, so searching and filtering don't lose them.
     $chosen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $shown = [System.Collections.Generic.List[string]]::new()
+    $shown = [System.Collections.Generic.List[string]]::new()      # the sites the list shows, in order
+    $matching = [System.Collections.Generic.List[string]]::new()   # every site the filters and search match
     # Folder: the fix on screen. Step: Preview or Remove. Running: a step is going. Key: the choices it was started with.
     # PreviewKey: the choices of a finished preview, so Remove only works for exactly those. ToRemove: what the preview would remove.
     # Rows: the preview's links. Unticked: the links to remove that have been unticked, by Get-CrLinkKey. ShowingPreview: the list holds a preview.
     $st = @{ Filling = $false; Folder = $null; Step = $null; Running = $false; Key = $null; PreviewKey = $null; ToRemove = 0; Removed = $false; Sheet = $null
-        Rows = @(); Unticked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase); ShowingPreview = $false; ListFilling = $false
-        SortColumn = -1; SortDescending = $false; Shown = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
+        Rows = @(); Unticked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase); ShowingPreview = $false; Process = $null
+        SortColumn = -1; SortDescending = $false }
 
     # Each site by address, and when each was last previewed. Worked out once (and again after each
     # preview), not on every keystroke or tick: a tenant can have thousands of OneDrives.
     $siteByUrl = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($s in $Sites) { $siteByUrl["$($s.url)"] = $s }
+    $siteUrls = [string[]]@($Sites | ForEach-Object { "$($_.url)" })
     $lastChecked = [System.Collections.Generic.Dictionary[string, DateTime]]::new([StringComparer]::OrdinalIgnoreCase)
     $readLastChecked = {
         $lastChecked.Clear()
-        foreach ($s in $Sites) {
-            $t = Get-CrLinkCacheTime -ResultsRoot $resultsRoot -Tenant $tenant -SiteUrl $s.url
-            if ($t) { $lastChecked["$($s.url)"] = $t }
-        }
+        $times = Get-CrLinkCacheTimes -ResultsRoot $resultsRoot -Tenant $tenant -SiteUrls $siteUrls
+        foreach ($k in $times.Keys) { $lastChecked[$k] = $times[$k] }
     }.GetNewClosure()
     & $readLastChecked
+    # Each site's place (SharePoint, Team, Channel or OneDrive), worked out once.
+    $placeOf = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($s in $Sites) { $placeOf["$($s.url)"] = Get-CrSitePlace $s }
 
+    # The site list, built as one list of lines and added in one go: thousands of sites one at a time is slow.
+    # The list shows at most this many sites: past a couple of thousand it gets slow to fill. Typing narrows
+    # it, and Check all ticks every site that matches, shown or not.
+    $maxSitesShown = 2000
     $fill = {
         $st.Filling = $true
+        $text = $search.Text.Trim()
+        $want = @{}
+        foreach ($k in $placeBoxes.Keys) { $want[$k] = $placeBoxes[$k].Checked }
+        $lines = [System.Collections.Generic.List[object]]::new()
+        $shown.Clear()
+        $matching.Clear()
+        foreach ($s in $Sites) {
+            $u = "$($s.url)"
+            $p = $placeOf[$u]
+            if (-not $want[$p]) { continue }
+            if ($text -and $u.IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and "$($s.title)".IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            $matching.Add($u)
+            if ($lines.Count -ge $maxSitesShown) { continue }
+            $name = if ($s.title) { $s.title } else { $u }
+            # Before the address, which can be long enough to push it out of sight.
+            $seen = if ($lastChecked.ContainsKey($u)) { "   (last checked $($lastChecked[$u].ToString('MMM d, h:mm tt')))" } else { '' }
+            $lines.Add("$name   [$p]$seen   $u")
+            $shown.Add($u)
+        }
         $list.BeginUpdate()
         $list.Items.Clear()
-        $shown.Clear()
-        $text = $search.Text.Trim()
-        foreach ($s in $Sites) {
-            $p = Get-CrSitePlace $s
-            if (-not $placeBoxes[$p].Checked) { continue }
-            if ($text -and $s.url.IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and "$($s.title)".IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
-            $name = if ($s.title) { $s.title } else { $s.url }
-            # Before the address, which can be long enough to push it out of sight.
-            $seen = if ($lastChecked.ContainsKey($s.url)) { "   (last checked $($lastChecked[$s.url].ToString('MMM d, h:mm tt')))" } else { '' }
-            $i = $list.Items.Add("$name   [$p]$seen   $($s.url)")
-            $shown.Add($s.url)
-            if ($chosen.Contains($s.url)) { $list.SetItemChecked($i, $true) }
-        }
+        $list.Items.AddRange($lines.ToArray())
+        for ($i = 0; $i -lt $shown.Count; $i++) { if ($chosen.Contains($shown[$i])) { $list.SetItemChecked($i, $true) } }
         $list.EndUpdate()
+        $moreSites.Visible = $matching.Count -gt $shown.Count
+        $moreSites.Text = ('Showing {0:N0} of {1:N0}: type to find the others. Check all ticks all {1:N0}.' -f $shown.Count, $matching.Count)
+        $tickShown.Text = if ($matching.Count -gt $shown.Count) { 'Check all {0:N0}' -f $matching.Count } else { 'Check all shown' }
         $st.Filling = $false
     }.GetNewClosure()
 
@@ -313,60 +334,76 @@ function Add-CrRemediationTab {
         $openFolder.Enabled = [bool]$st.Folder
     }.GetNewClosure()
 
-    # A row of the results list for one link.
-    $addRow = {
-        param($r, [string] $what, [string] $key, [bool] $ticked)
-        $made = ConvertTo-CrLinkDate $r.created
-        $row = [System.Windows.Forms.ListViewItem]::new($what)
-        $row.Tag = [pscustomobject]@{ Key = $key; Tickable = [bool]($key -and $r.remove) }
-        $row.Checked = $ticked
-        foreach ($text in @((Get-CrLinkTypeWord $r.type), $r.access, $(if ($made) { $made.ToLocalTime().ToString('MMM d, yyyy') } else { 'Unknown' }), $r.sharedWith, $r.url, $(if ($r.siteTitle) { $r.siteTitle } else { $r.site }))) {
-            $null = $row.SubItems.Add("$text")
+    $typeWords = @{}
+    foreach ($t in 'Anyone', 'Organization', 'SpecificPeople', 'Other') { $typeWords[$t] = Get-CrLinkTypeWord $t }
+    $red = [System.Drawing.Color]::FromArgb(198, 40, 40)
+    # Each row's text (all but What happens) and its key, worked out once for each new list of rows,
+    # by position: thousands of rows are drawn, sorted and redrawn many times, and this is the slow part.
+    $prep = @{ For = $null; Cells = $null; Keys = $null }
+    $prepare = {
+        $rows = $st.Rows
+        $cells = [string[][]]::new($rows.Count)
+        $keys = [string[]]::new($rows.Count)
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            $made = 'Unknown'
+            $d = [DateTimeOffset]::MinValue
+            if ($r.created -and [DateTimeOffset]::TryParse("$($r.created)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$d)) { $made = $d.ToLocalTime().ToString('MMM d, yyyy') }
+            $type = "$($r.type)"
+            if ($typeWords.ContainsKey($type)) { $type = $typeWords[$type] }
+            $cells[$i] = [string[]]@('', $type, "$($r.access)", $made, "$($r.sharedWith)", "$($r.url)", $(if ($r.siteTitle) { "$($r.siteTitle)" } else { "$($r.site)" }))
+            $keys[$i] = "$($r.site)|$($r.listId)|$($r.itemId)|$($r.shareId)"   # as Get-CrLinkKey
         }
-        if ($what -like 'Keep*' -or $what -eq 'Already gone') { $row.ForeColor = $Muted }
-        elseif ($what -like 'Failed*') { $row.ForeColor = [System.Drawing.Color]::FromArgb(198, 40, 40) }
-        $null = $results.Items.Add($row)
+        $prep.For = $rows; $prep.Cells = $cells; $prep.Keys = $keys
     }.GetNewClosure()
-    # Many thousands of rows make the list slow; the spreadsheet always has them all. Ticked links
-    # beyond what the list shows are still removed, so the Remove warning says how many there are.
-    $maxRows = 5000
 
-    # Fills the list from Rows: a preview's links, each to remove with its tick box (the ones that stay hidden if
-    # asked), or what Remove did to each. Sorted by the heading last clicked, if any.
+    # What happens to row i of Rows, in words: what Remove did, or, for a preview, whether it goes.
+    $whatOf = {
+        param([int] $i)
+        $r = $st.Rows[$i]
+        if (-not $st.ShowingPreview) { "$($r.result)" }
+        elseif (-not $r.remove) { "Keep: $($r.why)" }
+        elseif ($st.Unticked.Contains($prep.Keys[$i])) { 'Keep: you unticked it' }
+        else { 'Will be removed' }
+    }.GetNewClosure()
+
+    # The list is "virtual": it asks for just the rows it draws (see RetrieveVirtualItem below), so it shows
+    # every link however many there are; filling a list of thousands row by row took many seconds.
+    # Order: which row of Rows each line of the list shows, after hiding and sorting.
+    $view = @{ Order = [int[]]@() }
     $render = {
-        $whatOf = {
-            param($r)
-            if (-not $st.ShowingPreview) { return "$($r.result)" }
-            if (-not $r.remove) { "Keep: $($r.why)" } elseif ($st.Unticked.Contains((Get-CrLinkKey $r))) { 'Keep: you unticked it' } else { 'Will be removed' }
+        if (-not [object]::ReferenceEquals($prep.For, $st.Rows)) { & $prepare }
+        $rows = $st.Rows
+        $n = $rows.Count
+        $preview = $st.ShowingPreview
+        $what = [string[]]::new($n)
+        $pick = [System.Collections.Generic.List[int]]::new()
+        for ($i = 0; $i -lt $n; $i++) {
+            $r = $rows[$i]
+            $what[$i] = if (-not $preview) { "$($r.result)" } elseif (-not $r.remove) { "Keep: $($r.why)" } elseif ($st.Unticked.Contains($prep.Keys[$i])) { 'Keep: you unticked it' } else { 'Will be removed' }
+            if (-not $preview -or $r.remove -or -not $hideKept.Checked) { $pick.Add($i) }
         }
-        $rows = @($st.Rows | Where-Object { -not $st.ShowingPreview -or $_.remove -or -not $hideKept.Checked })
-        if ($st.SortColumn -ge 0) {
-            # Dates sort as dates (unknown ones first), the rest as the text shown.
-            $by = switch ($st.SortColumn) {
-                0 { { & $whatOf $_ } }
-                1 { { Get-CrLinkTypeWord $_.type } }
-                2 { { $_.access } }
-                3 { { "$($_.created)" } }
-                4 { { $_.sharedWith } }
-                5 { { $_.url } }
-                default { { if ($_.siteTitle) { $_.siteTitle } else { $_.site } } }
+        $order = $pick.ToArray()
+        if ($st.SortColumn -ge 0 -and $order.Count -gt 1) {
+            # Sorted on prepared keys; the position after each keeps rows that tie in their order. Dates sort as
+            # dates (unknown ones first), the rest as the text shown.
+            $col = $st.SortColumn
+            $sortKeys = [string[]]::new($order.Count)
+            for ($j = 0; $j -lt $order.Count; $j++) {
+                $i = $order[$j]
+                $k = if ($col -eq 0) { $what[$i] } elseif ($col -eq 3) { "$($rows[$i].created)" } else { $prep.Cells[$i][$col] }
+                $sortKeys[$j] = "$k`0$($j.ToString('D7'))"
             }
-            $rows = @($rows | Sort-Object -Property @{ Expression = $by } -Descending:$st.SortDescending -Stable)
+            [Array]::Sort($sortKeys, $order, [StringComparer]::OrdinalIgnoreCase)
+            if ($st.SortDescending) { [Array]::Reverse($order) }
         }
-        foreach ($i in 0..($columnNames.Count - 1)) {
-            $results.Columns[$i].Text = if ($i -eq $st.SortColumn) { "$($columnNames[$i]) $(if ($st.SortDescending) { [char]0x25BC } else { [char]0x25B2 })" } else { $columnNames[$i] }
+        foreach ($c in 0..($columnNames.Count - 1)) {
+            $results.Columns[$c].Text = if ($c -eq $st.SortColumn) { "$($columnNames[$c]) $(if ($st.SortDescending) { [char]0x25BC } else { [char]0x25B2 })" } else { $columnNames[$c] }
         }
-        $st.ListFilling = $true
-        $st.Shown.Clear()
-        $results.BeginUpdate(); $results.Items.Clear()
-        foreach ($r in $rows | Select-Object -First $maxRows) {
-            $key = if ($st.ShowingPreview) { Get-CrLinkKey $r } else { '' }
-            if ($key) { [void]$st.Shown.Add($key) }
-            $what = & $whatOf $r
-            & $addRow $r $what $key ($st.ShowingPreview -and $what -eq 'Will be removed')
-        }
-        $results.EndUpdate()
-        $st.ListFilling = $false
+        $view.Order = $order
+        $results.VirtualListSize = 0          # so rows already drawn are asked for again
+        $results.VirtualListSize = $order.Count
+        $results.Invalidate()
     }.GetNewClosure()
 
     # What a finished, stopped or failed step leaves on screen.
@@ -394,7 +431,6 @@ function Add-CrRemediationTab {
                 $results.CheckBoxes = $true
                 & $render
                 $listTools.Visible = $st.ToRemove -gt 0
-                $more = if ($links.Count -gt $maxRows) { " The first {0:N0} are shown here; the spreadsheet has them all." -f $maxRows } else { '' }
                 # How it checked: sites brought up to date from Microsoft's list of changes, and sites read in full.
                 $how = ''
                 if ($found.checked -and [int]$found.checked.changes) {
@@ -406,7 +442,7 @@ function Add-CrRemediationTab {
                     $how += ' On {0:N0} site(s) a folder''s sharing had changed since last time, and Microsoft then asks for everything there to be read again, so it was.' -f [int]$found.checked.resync
                 }
                 $status.Text = if (-not $links.Count) { "Preview done: no sharing links on the $(@($found.sites)) site(s) checked.$how$problemText" }
-                else { ("Preview done: {0:N0} link(s) found, {1:N0} would be removed. Nothing has been changed yet.$how$more$problemText" -f $links.Count, $st.ToRemove) }
+                else { ("Preview done: {0:N0} link(s) found, {1:N0} would be removed. Nothing has been changed yet.$how$problemText" -f $links.Count, $st.ToRemove) }
             }
             else { $status.Text = 'Preview stopped before it finished. Nothing was changed. Press Preview to start again.' }
         }
@@ -419,9 +455,7 @@ function Add-CrRemediationTab {
                 $st.ShowingPreview = $false
                 $listTools.Visible = $false
                 $st.Rows = $links
-                $st.ListFilling = $true
-                $results.Items.Clear(); $results.CheckBoxes = $false
-                $st.ListFilling = $false
+                $results.CheckBoxes = $false
                 & $render
                 $what = '{0:N0} removed, {1:N0} already gone, {2:N0} failed.' -f [int]$p.removed, [int]$p.gone, [int]$p.failed
                 if ([int]$p.skipped) { $what += ' {0:N0} left as they were because you unticked them.' -f [int]$p.skipped }
@@ -446,22 +480,24 @@ function Add-CrRemediationTab {
     $timer.Add_Tick({
             if (-not $st.Folder) { return }
             $p = Read-CrProgress $st.Folder
-            if (-not $p) { return }
-            if ($p.state -in 'Completed', 'Cancelled', 'Failed') { $timer.Stop(); & $showDone $p; return }
-            # Still this window's own 'Starting': the step hasn't written yet. Give it a minute to start.
-            if ($p.state -eq 'Starting' -and [int]$p.pid -eq $PID) {
-                $since = [DateTimeOffset]::MinValue
-                $young = [DateTimeOffset]::TryParse("$($p.updatedAt)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$since) -and
-                    $since -gt [DateTimeOffset]::UtcNow.AddMinutes(-1)
-                if ($young) { $status.Text = 'Starting...'; return }
-                $timer.Stop()
-                & $showDone ([pscustomobject]@{ state = 'Failed'; error = "it didn't start. The log in its folder says why."; problems = @() })
-                return
+            # Started from this window: until the step itself reports (it writes progress with its own process),
+            # what's in the file is from before, so it is followed by its process instead, however long it takes.
+            if ($st.Process -and ($null -eq $p -or [int]$p.pid -ne $st.Process.Id)) {
+                if (-not $st.Process.HasExited) { $status.Text = 'Starting...'; return }
+                $p = Read-CrProgress $st.Folder   # it may have reported just as it ended
+                if ($null -eq $p -or [int]$p.pid -ne $st.Process.Id) {
+                    $timer.Stop()
+                    $st.Process = $null
+                    & $showDone ([pscustomobject]@{ state = 'Failed'; error = "it closed before starting; the log in its folder says why"; problems = @() })
+                    return
+                }
             }
+            if (-not $p) { return }
+            if ($p.state -in 'Completed', 'Cancelled', 'Failed') { $timer.Stop(); $st.Process = $null; & $showDone $p; return }
             if (-not (Test-CrScanRunning $st.Folder)) {
                 # The hidden window ended without saying so.
                 $timer.Stop()
-                & $showDone ([pscustomobject]@{ state = 'Failed'; error = "it ended unexpectedly. The log in its folder says why."; problems = @() })
+                & $showDone ([pscustomobject]@{ state = 'Failed'; error = 'it ended unexpectedly; the log in its folder says why'; problems = @() })
                 return
             }
             $bar.Visible = $true
@@ -481,12 +517,14 @@ function Add-CrRemediationTab {
         $st.Running = $true
         $status.Text = 'Starting...'
         if ($step -eq 'Preview') {
-            $results.Items.Clear(); $st.PreviewKey = $null; $st.Sheet = $null; $st.ToRemove = 0
+            $st.PreviewKey = $null; $st.Sheet = $null; $st.ToRemove = 0
             $st.Rows = @(); $st.Unticked.Clear(); $st.ShowingPreview = $false
+            & $render
         }
         $listTools.Visible = $false
         & $update
-        try { $null = & $startFix $st.Folder $step (& $selectedPace).Id }
+        # The step's own process: until it reports, the timer follows it, however long it takes to start.
+        try { $st.Process = & $startFix $st.Folder $step (& $selectedPace).Id | Where-Object { $_ -is [System.Diagnostics.Process] } | Select-Object -First 1 }
         catch {
             $st.Running = $false
             $status.Text = "Couldn't start: $($_.Exception.Message)"
@@ -518,15 +556,8 @@ function Add-CrRemediationTab {
             $what = if ($going.Count -eq 1) { '1 sharing link' } else { '{0:N0} sharing links' -f $going.Count }
             $where = if ($siteCount -eq 1) { '1 site' } else { '{0:N0} sites' -f $siteCount }
             $left = if ($st.Unticked.Count) { " The $($st.Unticked.Count) you unticked are left as they are." } else { '' }
-            # Ticked links the list couldn't show (it shows at most $maxRows): said plainly, so nothing goes unseen.
-            $unseen = @($going | Where-Object { -not $st.Shown.Contains((Get-CrLinkKey $_)) }).Count
-            $hidden = if ($unseen) {
-                ("`n`n{0:N0} of these aren't shown in the list, which shows at most {1:N0}. They are in the spreadsheet (Open spreadsheet), " +
-                    'and will be removed too. To review them here, sort or hide the kept links to bring them into view, or narrow the choices and preview again.') -f $unseen, $maxRows
-            }
-            else { '' }
             $answer = [System.Windows.Forms.MessageBox]::Show($form,
-                "Remove $what from $($where)? These are the links ticked in the preview.$left Anyone using them loses access straight away, and this can't be undone.$hidden",
+                "Remove $what from $($where)? These are the links ticked in the preview.$left Anyone using them loses access straight away, and this can't be undone.",
                 'Remove sharing links', 'YesNo', 'Warning', 'Button2')
             if ($answer -ne 'Yes') { return }
             # The background step reads which links to leave alone from the fix's folder.
@@ -534,16 +565,45 @@ function Add-CrRemediationTab {
             & $begin 'Remove'
         }.GetNewClosure())
 
-    # Ticking and unticking links in the preview. Links that stay can't be ticked: change the choices and preview again for those.
-    $results.Add_ItemCheck({
+    # Each line of the list as it is drawn: the row it shows (View.Order), its words, and its tick box.
+    $results.Add_RetrieveVirtualItem({
             param($sender, $e)
-            if ($st.ListFilling) { return }
-            $item = $results.Items[$e.Index]
-            $tag = $item.Tag
-            if (-not $st.ShowingPreview -or $st.Running -or $st.Removed -or -not $tag -or -not $tag.Tickable) { $e.NewValue = $e.CurrentValue; return }
-            if ($e.NewValue -eq 'Checked') { [void]$st.Unticked.Remove($tag.Key); $item.Text = 'Will be removed'; $item.ForeColor = [System.Drawing.SystemColors]::WindowText }
-            else { [void]$st.Unticked.Add($tag.Key); $item.Text = 'Keep: you unticked it'; $item.ForeColor = $Muted }
-            $form.BeginInvoke([Action]{ & $update }) | Out-Null
+            $i = $view.Order[$e.ItemIndex]
+            $what = & $whatOf $i
+            $cells = [string[]]$prep.Cells[$i].Clone()
+            $cells[0] = $what
+            $item = [System.Windows.Forms.ListViewItem]::new($cells)
+            if ($st.ShowingPreview) { $item.Checked = $what -eq 'Will be removed' }
+            if ($what -like 'Keep*' -or $what -eq 'Already gone') { $item.ForeColor = $Muted }
+            elseif ($what -like 'Failed*') { $item.ForeColor = $red }
+            $e.Item = $item
+        }.GetNewClosure())
+
+    # Ticking and unticking links in the preview, by clicking a tick box or pressing Space on the selected
+    # lines. Links that stay can't be ticked: change the choices and preview again for those.
+    $toggle = {
+        param([int[]] $lines)
+        if (-not $st.ShowingPreview -or $st.Running -or $st.Removed) { return }
+        foreach ($line in $lines) {
+            $i = $view.Order[$line]
+            if (-not $st.Rows[$i].remove) { continue }
+            $key = $prep.Keys[$i]
+            if (-not $st.Unticked.Remove($key)) { [void]$st.Unticked.Add($key) }
+            $results.RedrawItems($line, $line, $false)
+        }
+        & $update
+    }.GetNewClosure()
+    $results.Add_MouseClick({
+            param($sender, $e)
+            $hit = $results.HitTest($e.Location)
+            if ($hit.Item -and $hit.Location -eq [System.Windows.Forms.ListViewHitTestLocations]::StateImage) { & $toggle @($hit.Item.Index) }
+        }.GetNewClosure())
+    $results.Add_KeyDown({
+            param($sender, $e)
+            if ($e.KeyCode -ne 'Space') { return }
+            & $toggle ([int[]]@($results.SelectedIndices))
+            $e.Handled = $true
+            $e.SuppressKeyPress = $true
         }.GetNewClosure())
     $hideKept.Add_CheckedChanged({ & $render }.GetNewClosure())
     $tickAllLinks.Add_LinkClicked({ $st.Unticked.Clear(); & $render; & $update }.GetNewClosure())
@@ -562,7 +622,11 @@ function Add-CrRemediationTab {
     $openFolder.Add_Click({ if ($st.Folder) { Start-Process explorer.exe -ArgumentList "`"$($st.Folder)`"" } }.GetNewClosure())
 
     foreach ($b in $placeBoxes.Values) { $b.Add_CheckedChanged({ & $fill }.GetNewClosure()) }
-    $search.Add_TextChanged({ & $fill }.GetNewClosure())
+    # The list is filled again once typing pauses, not on every key: with thousands of sites each fill takes a moment.
+    $searchPause = [System.Windows.Forms.Timer]@{ Interval = 300 }
+    $searchPause.Add_Tick({ $searchPause.Stop(); & $fill }.GetNewClosure())
+    $search.Add_TextChanged({ $searchPause.Stop(); $searchPause.Start() }.GetNewClosure())
+    $form.Add_FormClosed({ $searchPause.Stop(); $searchPause.Dispose() }.GetNewClosure())
     $list.Add_ItemCheck({
             param($sender, $e)
             if ($st.Filling) { return }
@@ -571,7 +635,7 @@ function Add-CrRemediationTab {
             # ItemCheck fires before the tick changes, so count after it has.
             $form.BeginInvoke([Action]{ & $update }) | Out-Null
         }.GetNewClosure())
-    $tickShown.Add_LinkClicked({ foreach ($url in $shown) { [void]$chosen.Add($url) }; & $fill; & $update }.GetNewClosure())
+    $tickShown.Add_LinkClicked({ foreach ($url in $matching) { [void]$chosen.Add($url) }; & $fill; & $update }.GetNewClosure())
     $clearAll.Add_LinkClicked({ $chosen.Clear(); & $fill; & $update }.GetNewClosure())
     foreach ($r in @($linkBoxes.Values) + $ageRadios) { $r.Add_CheckedChanged({ & $update }.GetNewClosure()) }
     $days.Add_ValueChanged({ & $update }.GetNewClosure())

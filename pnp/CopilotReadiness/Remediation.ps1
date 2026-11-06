@@ -19,6 +19,10 @@ $script:ProgressEverySeconds = 2
 # How many of the people on one link are named in "Shared with"; past that it says how many more.
 $script:MaxLinkMembers = 100
 
+# What a link cache holds. Raised whenever what's kept for each link changes (2: "Shared with" counts
+# everyone on a link), so caches saved before are read in full once rather than carried over as they were.
+$script:LinkCacheVersion = 2
+
 # The words each link type is shown with, in the window and the spreadsheets.
 $script:LinkTypeWords = [ordered]@{
     Anyone         = 'Anyone'
@@ -83,7 +87,7 @@ function Get-CrTeamsMarks {
     #>
     param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ResultsRoot, [switch] $Refresh)
     $path = Join-Path $ResultsRoot ("teams-sites-{0}.json" -f (Get-CrTenantFileName $Settings.tenant))
-    $kept = Get-CrKeptCopy -Path $path -MaxAgeDays $script:TeamsMarksDays -Refresh:$Refresh -Read { Read-CrTeamsMarks $Settings }
+    $kept = Get-CrKeptCopy -Path $path -MaxAgeDays $script:TeamsMarksDays -Refresh:$Refresh -OldKey 'marks' -Read { Read-CrTeamsMarks $Settings }
     if ($kept.Problem) { Write-Host "Couldn't read which sites belong to Teams just now, so using the list from before: $($kept.Problem)" }
     $marks = @{}
     $read = ConvertTo-CrDictionary $kept.Value
@@ -274,9 +278,9 @@ function Start-CrBackgroundFix {
     # Each run its own log, so running a step again never writes over the record of an earlier one.
     $log = Join-Path $Folder "$($Step.ToLowerInvariant())-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     $arguments = '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$StartScript`"", '-RunFix', "`"$Folder`"", '-FixStep', $Step, '-FixPace', $Pace, '-SettingsPath', "`"$SettingsPath`""
-    # 'Starting' is written before the step is launched, as this window's, and the step then writes its
-    # own; nothing here writes after it starts, so its own report (even an error straight away) always stands.
-    Write-CrFixProgress -Folder $Folder -Step $Step -State Starting
+    # Nothing is written here: the step writes its own progress as soon as it starts, so its own report
+    # (even an error straight away) always stands, and a launch that fails leaves the folder as it was.
+    # The window follows the process returned until the step reports.
     Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $arguments -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "$log.log" -RedirectStandardError "$log-errors.log"
 }
@@ -342,7 +346,7 @@ function Get-CrLatestFix {
             $running = Test-CrScanRunning $dir.FullName
             $previewFile = Join-Path $dir.FullName 'preview.json'
             $started = Test-CrRemoveStarted $dir.FullName
-            $previewed = -not $running -and (Test-Path -LiteralPath $previewFile) -and -not $started -and $progress -and $progress.state -ne 'Starting'
+            $previewed = -not $running -and (Test-Path -LiteralPath $previewFile) -and -not $started
             # Cut off: it dealt with links but never wrote its ending, and nothing is working on it now.
             $interrupted = -not $running -and $started -and -not (Test-Path -LiteralPath (Join-Path $dir.FullName 'removed.json'))
             $at = if ($previewed) { [DateTimeOffset]::Parse((Read-CrJson $previewFile).finishedAt, [Globalization.CultureInfo]::InvariantCulture) }
@@ -407,9 +411,9 @@ function New-CrLinkRecord {
     $created = ConvertTo-CrLinkDate "$($d.Created)"
     $people = @(@($Link.linkMembers) + @($d.Invitations | ForEach-Object { $_.invitee }) | Where-Object { $_ } |
             ForEach-Object { if ($_.email) { "$($_.email)" } elseif ($_.name) { "$($_.name)" } } | Where-Object { $_ } | Select-Object -Unique)
-    # SharePoint names only so many of the people on a link; it says how many there are in all, so the rest are counted.
-    $named = @($Link.linkMembers | Where-Object { $_ }).Count
-    $more = [int]$Link.totalLinkMembersCount - $named
+    # SharePoint names only so many of the people on a link; it says how many there are in all, so the rest
+    # are counted. People invited to the link are usually among them too, so everyone named counts.
+    $more = [int]$Link.totalLinkMembersCount - $people.Count
     if ($more -gt 0) { $people += "and $more more" }
     $by = if ($d.CreatedBy) { if ($d.CreatedBy.email) { "$($d.CreatedBy.email)" } else { "$($d.CreatedBy.name)" } } else { '' }
     [pscustomobject][ordered]@{
@@ -469,6 +473,25 @@ function Get-CrLinkCachePath {
     param([Parameter(Mandatory)] [string] $ResultsRoot, [Parameter(Mandatory)] [string] $Tenant, [Parameter(Mandatory)] [string] $SiteUrl)
     $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($SiteUrl.TrimEnd('/').ToLowerInvariant())))
     Join-Path $ResultsRoot (Join-Path 'link-cache' (Join-Path (Get-CrTenantFileName $Tenant) "$($hash.Substring(0, 24).ToLowerInvariant()).json"))
+}
+
+function Get-CrLinkCacheTimes {
+    <#
+      When a preview last finished on each of these sites, for those that have a link cache:
+      address -> time. Lists the cache folder once, so it stays quick for thousands of sites.
+    #>
+    param([Parameter(Mandatory)] [string] $ResultsRoot, [Parameter(Mandatory)] [string] $Tenant, [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $SiteUrls)
+    $times = [System.Collections.Generic.Dictionary[string, DateTime]]::new([StringComparer]::OrdinalIgnoreCase)
+    $folder = Split-Path (Get-CrLinkCachePath -ResultsRoot $ResultsRoot -Tenant $Tenant -SiteUrl 'https://example')
+    if (-not [System.IO.Directory]::Exists($folder)) { return $times }
+    $files = [System.Collections.Generic.Dictionary[string, DateTime]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($f in [System.IO.Directory]::GetFiles($folder, '*.json')) { $files[[System.IO.Path]::GetFileName($f)] = [System.IO.File]::GetLastWriteTime($f) }
+    if (-not $files.Count) { return $times }
+    foreach ($url in $SiteUrls) {
+        $name = [System.IO.Path]::GetFileName((Get-CrLinkCachePath -ResultsRoot $ResultsRoot -Tenant $Tenant -SiteUrl $url))
+        if ($files.ContainsKey($name)) { $times[$url] = $files[$name] }
+    }
+    $times
 }
 
 function Get-CrLinkCacheTime {
@@ -704,11 +727,14 @@ function Invoke-CrLinkPreview {
                 $saved = $null
                 if (-not $fullCheck -and (Test-Path -LiteralPath $cacheFile)) {
                     try { $saved = Read-CrJson $cacheFile } catch { $saved = $null }   # unreadable: read the site in full
+                    # Kept by an earlier version, holding less about each link: read the site in full this once.
+                    if ($saved -and [int]$saved.version -lt $script:LinkCacheVersion) { $saved = $null }
                 }
                 $found = Get-CrSiteLinkInventory -Site $site -Saved $saved -OnItem $onItem
                 # Kept only once the whole site is done, so a stopped preview never leaves half a site behind.
                 New-Item -ItemType Directory -Path (Split-Path $cacheFile) -Force | Out-Null
                 Write-CrJson $cacheFile ([pscustomobject][ordered]@{
+                        version   = $script:LinkCacheVersion
                         site      = "$($site.url)"
                         savedAt   = [DateTimeOffset]::UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
                         libraries = [pscustomobject]$found.Libraries
@@ -835,7 +861,6 @@ function Invoke-CrLinkRemove {
     $journal.AutoFlush = $true
     # Progress is saved every couple of seconds, as the preview does, not for every file.
     $lastSaved = [DateTime]::MinValue
-    $stopAfter = $false
     try {
         foreach ($group in $todo | Group-Object site, listId, itemId) {
             $first = $group.Group[0]
@@ -862,21 +887,22 @@ function Invoke-CrLinkRemove {
                     catch {
                         if ($_.Exception -is [System.OperationCanceledException]) { throw }
                         $why = $_.Exception.Message
-                        # The answer can be lost after SharePoint has done it (a timeout, say): look before calling it failed.
-                        # Stop pressed while looking: the result is written down as not known, then it stops.
-                        $stillThere = try { @(Get-CrItemLinks (Get-CrSharingInfo $link.site $link.listId $link.itemId) | ForEach-Object { "$($_.linkDetails.ShareId)" }) -contains $link.shareId }
-                        catch { if ($_.Exception -is [System.OperationCanceledException]) { $stopAfter = $true; $null } else { $true } }
-                        if ($stopAfter) { "Not known: SharePoint's answer was lost and it stopped before it could check. Look at this file's sharing" }
-                        elseif ($stillThere) { "Failed: $why" } else { 'Removed' }
+                        # The answer can be lost after SharePoint has done it (a timeout, say): look before calling it
+                        # failed. This one look goes ahead even if Stop has just been pressed, so the record always
+                        # says Removed or Failed; the stop is taken up at the next link.
+                        $stopFile = $script:StopFile
+                        Set-CrStopFile $null
+                        try { $stillThere = try { @(Get-CrItemLinks (Get-CrSharingInfo $link.site $link.listId $link.itemId) | ForEach-Object { "$($_.linkDetails.ShareId)" }) -contains $link.shareId } catch { $true } }
+                        finally { Set-CrStopFile $stopFile }
+                        if ($stillThere) { "Failed: $why" } else { 'Removed' }
                     }
                 }
-                switch -Wildcard ($result) { 'Removed' { $counts.removed++ } 'Already gone' { $counts.gone++ } 'Failed*' { $counts.failed++ } 'Not known*' { $counts.failed++ } }
+                switch -Wildcard ($result) { 'Removed' { $counts.removed++ } 'Already gone' { $counts.gone++ } 'Failed*' { $counts.failed++ } }
                 Write-Host "$(Get-Date -Format s) $result  $($link.url)"
                 $copy = $link | Select-Object *
                 $copy | Add-Member -NotePropertyName result -NotePropertyValue $result
                 $done.Add($copy)
                 $journal.WriteLine((ConvertTo-Json -InputObject $copy -Compress -Depth 5))
-                if ($stopAfter) { throw [System.OperationCanceledException]::new('Stopped.') }
             }
         }
         $ended = 'Completed'

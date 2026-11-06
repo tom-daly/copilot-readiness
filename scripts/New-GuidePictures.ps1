@@ -266,8 +266,41 @@ try {
         DefaultLinkPermission = 'Edit'; RequireAnonymousLinksExpireInDays = -1; CoreOrganizationSharingLinkMaxExpirationInDays = 90
         ExternalUserExpirationRequired = $false; ExternalUserExpireInDays = 60; ShowEveryoneExceptExternalUsersClaim = $true; RestrictedSearchMode = 'Disabled'
     }
+    # The Remediation tab: some sites belong to Teams or channels, and a finished preview of three
+    # sites is waiting, made up like the rest, so the tab shows its list of links ready to remove.
+    foreach ($s in $sites) {
+        $mark = switch ($s.title) { { $_ -in 'Finance', 'Human Resources', 'Legal', 'Project Apollo' } { 'Team' } { $_ -in 'Board Documents' } { 'Channel' } default { $null } }
+        $s | Add-Member -NotePropertyName teams -NotePropertyValue $mark -Force
+    }
+    $fixRoot = Join-Path $work 'fixes-demo'
+    $fixSites = @($sites | Where-Object { $_.title -in 'Finance', 'Human Resources', 'Megan Bowen' })
+    $fixOptions = [pscustomobject]@{ links = @('Anyone', 'Organization'); age = 'OlderThan'; days = 180; before = '' }
+    $fixFolder = New-CrFix -ResultsRoot $fixRoot -Tenant $tenant -Sites $fixSites -Options $fixOptions
+    $now = [DateTimeOffset]::UtcNow
+    $demoLinks = @(
+        @('Finance', 'Budget 2026.xlsx', 'Anyone', 'Edit', 400, ''), @('Finance', 'Payroll', 'Organization', 'View', 300, ''),
+        @('Finance', 'Forecast.xlsx', 'Organization', 'Edit', 250, ''), @('Human Resources', 'Salary bands.xlsx', 'Organization', 'View', 220, ''),
+        @('Human Resources', 'Offer letters', 'SpecificPeople', 'View', 210, 'nestor@contoso.com'), @('Human Resources', 'Handbook draft.docx', 'Organization', 'View', 40, ''),
+        @('Megan Bowen', 'Team photos', 'Anyone', 'View', 380, ''), @('Megan Bowen', 'Notes.docx', 'Organization', 'Edit', 190, '')
+    ) | ForEach-Object -Begin { $n = 0 } -Process {
+        $n++
+        $site = $fixSites | Where-Object title -EQ $_[0]
+        $created = $now.AddDays(-$_[4])
+        $record = [pscustomobject][ordered]@{
+            site = $site.url; siteTitle = $site.title; place = (Get-CrSitePlace $site); url = "$($site.url)/Shared Documents/$($_[1])"; isFolder = $_[1] -notmatch '\.'
+            type = $_[2]; access = $_[3]; created = $created.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); createdBy = 'adele@contoso.com'; sharedWith = $_[5]; expires = ''
+            listId = 'demo'; itemId = $n; shareId = "demo-$n"; linkKind = 2
+        }
+        Add-CrLinkDecision -Record $record -Options $fixOptions -Cutoff $now.AddDays(-180)
+    }
+    Write-CrJson (Join-Path $fixFolder 'preview.json') ([pscustomobject]@{ finishedAt = $now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); sites = 3; checked = $null; problems = @(); links = @($demoLinks | Sort-Object @{ Expression = { -not $_.remove } }, site, url) })
+    Write-CrFixProgress -Folder $fixFolder -Step Preview -State Completed -Total 3 -Done 3 -Counts @{ found = $demoLinks.Count; toRemove = @($demoLinks | Where-Object remove).Count }
+    $remediation = @{ ResultsRoot = $fixRoot; Tenant = $tenant; TeamsKnown = $true; DefaultPace = 'Normal'; Start = { } }
+
     $form = New-CrControlForm -Sites $sites -TenantName $tenant -SharePointUrl $sharePoint -PastScans @(Get-CrPastScans $results -Tenant $tenant) `
-        -TenantSettings (Get-CrTenantSettingsView $values -SharePointUrl $sharePoint)
+        -TenantSettings (Get-CrTenantSettingsView $values -SharePointUrl $sharePoint) -TenantSettingsRead ([pscustomobject]@{ ReadAt = $now; Problem = $null }) -Remediation $remediation
+    # The app opens full screen; the pictures keep the usual window size so they read well in the guide.
+    $form.Add_Load({ $form.WindowState = 'Normal' }.GetNewClosure())
     $form.Show(); Pump 1000
     Save-Form $form '05-new-scan.png' @((Find-Control $form 'Start scan'))
     $tabs = Find-Type $form ([System.Windows.Forms.TabControl])
@@ -278,6 +311,8 @@ try {
     Save-Form $form '08-past-scans.png' @((Find-Control $form 'Open report'))
     $tabs.SelectedIndex = 2; Pump 1500
     Save-Form $form '09-tenant.png'
+    $tabs.SelectedTab = $tabs.TabPages | Where-Object Text -EQ 'Remediation'; Pump 1200
+    Save-Form $form '10-remediation.png' @((Find-Control $form 'Preview'))
     $form.Close(); $form.Dispose()
 
     # ── The progress window ─────────────────────────────────────────────────

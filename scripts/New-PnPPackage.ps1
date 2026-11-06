@@ -50,7 +50,7 @@ try {
         $image.Dispose()
         if ($width -lt 400 -or $height -lt 100) { throw "$($picture.Name) is only $width by $height. Retake it with scripts/New-GuidePictures.ps1." }
     }
-    $pages = 'install', 'setting-it-up', 'running-the-scripts', 'the-reports', 'if-something-goes-wrong', 'more-detail'
+    $pages = 'install', 'setting-it-up', 'running-the-scripts', 'the-reports', 'fixing-sharing-links', 'if-something-goes-wrong', 'more-detail'
     $contents = ($pages | ForEach-Object {
             $heading = (Get-Content -LiteralPath (Join-Path $docs "$_.md") -TotalCount 1 -Encoding utf8) -replace '^#\s*', ''
             "<li><a href=`"#$_`">$heading</a></li>"

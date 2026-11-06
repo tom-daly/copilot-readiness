@@ -164,19 +164,28 @@ function Uninstall-CrApp {
       (the caller saves). Every PC using the app loses access; setting it up again makes a new one.
       Other tenants' apps and certificates on this PC are left alone: they share the app's name,
       so only this tenant's certificate is removed, by its thumbprint. Past results are kept.
-      Returns how many apps were deleted from the tenant.
+
+      Throws only while the tenant step is going (signing in, or deleting the app), when nothing
+      has changed. After that it carries on whatever happens: settings.json always forgets the
+      deleted app, and a certificate that couldn't be deleted is reported, not thrown. Returns
+      Deleted (how many apps were deleted from the tenant) and CertificateProblem (why the
+      certificate couldn't be deleted, or nothing).
     #>
     param([Parameter(Mandatory)] $Settings, [switch] $DeviceLogin, [scriptblock] $Graph)
     if (-not $Settings.app.clientId) { throw "There's no app set up for $($Settings.tenant) on this PC." }
     if (-not $Graph) { $Graph = New-CrAdminGraph -Settings $Settings -DeviceLogin:$DeviceLogin }
     # The tenant first: if that fails, this PC keeps its certificate and nothing has changed.
     $deleted = Remove-CrAppFromTenant -Graph $Graph -AppId $Settings.app.clientId
+    $problem = $null
     $thumbprint = "$($Settings.app.thumbprint)"
-    if ($thumbprint -and (Test-Path -LiteralPath "Cert:\CurrentUser\My\$thumbprint")) {
-        Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey -Force
+    try {
+        if ($thumbprint -and (Test-Path -LiteralPath "Cert:\CurrentUser\My\$thumbprint")) {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey -Force -ErrorAction Stop
+        }
     }
+    catch { $problem = $_.Exception.Message }
     $Settings.app.clientId = ''
     $Settings.app.thumbprint = ''
     $Settings.app.createdAt = ''
-    $deleted
+    [pscustomobject]@{ Deleted = $deleted; CertificateProblem = $problem }
 }

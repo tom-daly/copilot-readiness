@@ -23,6 +23,7 @@ There's nothing to build. You download it, double-click it, and it shows you eac
 - **A report** listing every issue, worst first, with links straight to the site, folder or file.
 - **Spreadsheets** you can open in Excel, including one for each OneDrive to give to its owner.
 - **A review of your sharing settings**, showing what each one is now and what we recommend.
+- **A way to clean up sharing links**: remove the links you choose, by type, age and site, after a preview of exactly what will go. [How it works](docs/fixing-sharing-links.md).
 
 ## How to use it
 
@@ -41,9 +42,10 @@ The zip file also has the full guide in it: open **START HERE.html** for every s
 
 ## Is it safe?
 
-- **It never changes anything** in your Microsoft 365. It only reads.
-- **Your results stay on your PC.** The scan talks only to Microsoft, and nothing is sent anywhere else.
-- **You approve its access.** The first run creates an app in your Microsoft 365, and a Global Administrator has to accept its permissions. Microsoft's page lists full control of SharePoint sites, because Microsoft requires that permission to read who has access to a site. The scan uses it only to read. Every permission and the reason for it is at the top of `Start.ps1`.
+- **The scan never changes anything** in your Microsoft 365. It only reads.
+- **Only one button changes anything:** **Remove** on the Remediation tab, which removes the sharing links you chose. It shows you exactly what it would remove first, and asks you to confirm.
+- **Your results stay on your PC.** It talks only to Microsoft, and nothing is sent anywhere else.
+- **You approve its access.** The first run creates an app in your Microsoft 365, and a Global Administrator has to accept its permissions. Microsoft's page lists full control of SharePoint sites, because Microsoft requires that permission to read who has access to a site. The scan uses it only to read; the Remediation tab also uses it to remove the links you pick. Every permission and the reason for it is at the top of `Start.ps1`.
 - **Check before you scan OneDrive.** OneDrive isn't scanned unless you choose it. The report then lists the names of people's shared files, so make sure your organization is happy with that first.
 - **You can remove it completely.** [Here's how](docs/more-detail.md#removing-it).
 
@@ -57,5 +59,6 @@ Step by step, with screenshots:
 | **[Setting it up](docs/setting-it-up.md)** | Connect it to your Microsoft 365. You only do this once |
 | **[Running the scripts](docs/running-the-scripts.md)** | Choose what to scan, watch it run, stop and continue, check your sharing settings |
 | **[The reports](docs/the-reports.md)** | Read your scores, find what to fix, and use the spreadsheets |
+| **[Fixing sharing links](docs/fixing-sharing-links.md)** | Preview, then remove, the sharing links you choose |
 | **[If something goes wrong](docs/if-something-goes-wrong.md)** | What each problem means and what to do |
 | **[More detail](docs/more-detail.md)** | Settings, what it doesn't cover yet, and how to remove it |

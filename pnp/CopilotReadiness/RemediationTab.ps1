@@ -223,7 +223,21 @@ function Add-CrRemediationTab {
     # Rows: the preview's links. Unticked: the links to remove that have been unticked, by Get-CrLinkKey. ShowingPreview: the list holds a preview.
     $st = @{ Filling = $false; Folder = $null; Step = $null; Running = $false; Key = $null; PreviewKey = $null; ToRemove = 0; Removed = $false; Sheet = $null
         Rows = @(); Unticked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase); ShowingPreview = $false; ListFilling = $false
-        SortColumn = -1; SortDescending = $false }
+        SortColumn = -1; SortDescending = $false; Shown = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
+
+    # Each site by address, and when each was last previewed. Worked out once (and again after each
+    # preview), not on every keystroke or tick: a tenant can have thousands of OneDrives.
+    $siteByUrl = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($s in $Sites) { $siteByUrl["$($s.url)"] = $s }
+    $lastChecked = [System.Collections.Generic.Dictionary[string, DateTime]]::new([StringComparer]::OrdinalIgnoreCase)
+    $readLastChecked = {
+        $lastChecked.Clear()
+        foreach ($s in $Sites) {
+            $t = Get-CrLinkCacheTime -ResultsRoot $resultsRoot -Tenant $tenant -SiteUrl $s.url
+            if ($t) { $lastChecked["$($s.url)"] = $t }
+        }
+    }.GetNewClosure()
+    & $readLastChecked
 
     $fill = {
         $st.Filling = $true
@@ -236,9 +250,8 @@ function Add-CrRemediationTab {
             if (-not $placeBoxes[$p].Checked) { continue }
             if ($text -and $s.url.IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and "$($s.title)".IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
             $name = if ($s.title) { $s.title } else { $s.url }
-            $last = Get-CrLinkCacheTime -ResultsRoot $resultsRoot -Tenant $tenant -SiteUrl $s.url
             # Before the address, which can be long enough to push it out of sight.
-            $seen = if ($last) { "   (last checked $($last.ToString('MMM d, h:mm tt')))" } else { '' }
+            $seen = if ($lastChecked.ContainsKey($s.url)) { "   (last checked $($lastChecked[$s.url].ToString('MMM d, h:mm tt')))" } else { '' }
             $i = $list.Items.Add("$name   [$p]$seen   $($s.url)")
             $shown.Add($s.url)
             if ($chosen.Contains($s.url)) { $list.SetItemChecked($i, $true) }
@@ -257,22 +270,26 @@ function Add-CrRemediationTab {
             before = $beforeDate.Value.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
         }
     }.GetNewClosure()
-    $chosenSites = { @($Sites | Where-Object { $chosen.Contains($_.url) }) }.GetNewClosure()
+    # The chosen sites, from the ticked addresses (not by going through every site in the tenant).
+    $chosenSites = { @(foreach ($url in $chosen) { if ($siteByUrl.ContainsKey($url)) { $siteByUrl[$url] } }) }.GetNewClosure()
     # The choices as one piece of text, to tell whether a finished preview still matches them.
     # Only the option that applies counts, so changing the unused one doesn't undo the preview.
     $currentKey = {
+        param($picked)
+        if ($null -eq $picked) { $picked = & $chosenSites }
         $o = & $readOptions
         $age = switch ($o.age) { 'OlderThan' { "older:$($o.days)" } 'Before' { "before:$($o.before)" } default { 'any' } }
-        "$(@($o.links) -join '+')|$age|$((@(& $chosenSites | ForEach-Object url) | Sort-Object) -join ',')"
+        "$(@($o.links) -join '+')|$age|$((@($picked | ForEach-Object url) | Sort-Object) -join ',')"
     }.GetNewClosure()
 
     # The pace stays open while a step runs: changing it then tells the running step (see Update-CrFixPace).
     $inputs = @($actionBox, $linksBox, $ageBox, $fullCheck, $siteBox)
     $update = {
-        $n = @(& $chosenSites).Count
+        $picked = @(& $chosenSites)
+        $n = $picked.Count
         $chosenCount.Text = if ($n -eq 1) { '1 chosen' } else { '{0:N0} chosen' -f $n }
         # Whether the next preview reads everything or only what changed, so it's clear before pressing it.
-        $before = @(& $chosenSites | Where-Object { Get-CrLinkCacheTime -ResultsRoot $resultsRoot -Tenant $tenant -SiteUrl $_.url }).Count
+        $before = @($picked | Where-Object { $lastChecked.ContainsKey($_.url) }).Count
         $planNote.Text = if (-not $n) { '' }
         elseif ($fullCheck.Checked) { 'Next preview: every file on the chosen sites is read again.' }
         elseif ($before -eq $n) { "Next preview: all $(if ($n -eq 1) { 'of it was' } else { "$n were" }) checked before, so only what changed since is read." }
@@ -287,7 +304,7 @@ function Add-CrRemediationTab {
         else {
             $preview.Text = 'Preview'
             $preview.Enabled = $n -gt 0 -and @($linkBoxes.Values | Where-Object Checked).Count -gt 0
-            $same = $st.PreviewKey -and $st.PreviewKey -eq (& $currentKey)
+            $same = $st.PreviewKey -and $st.PreviewKey -eq (& $currentKey $picked)
             $ticked = $st.ToRemove - $st.Unticked.Count
             $remove.Enabled = [bool]($same -and -not $st.Removed -and $ticked -gt 0)
             $remove.Text = if ($remove.Enabled) { if ($ticked -eq 1) { 'Remove 1 link' } else { 'Remove {0:N0} links' -f $ticked } } else { 'Remove links' }
@@ -310,8 +327,9 @@ function Add-CrRemediationTab {
         elseif ($what -like 'Failed*') { $row.ForeColor = [System.Drawing.Color]::FromArgb(198, 40, 40) }
         $null = $results.Items.Add($row)
     }.GetNewClosure()
-    # Thousands of rows make the list slow; the spreadsheet always has them all.
-    $maxRows = 2000
+    # Many thousands of rows make the list slow; the spreadsheet always has them all. Ticked links
+    # beyond what the list shows are still removed, so the Remove warning says how many there are.
+    $maxRows = 5000
 
     # Fills the list from Rows: a preview's links, each to remove with its tick box (the ones that stay hidden if
     # asked), or what Remove did to each. Sorted by the heading last clicked, if any.
@@ -339,9 +357,11 @@ function Add-CrRemediationTab {
             $results.Columns[$i].Text = if ($i -eq $st.SortColumn) { "$($columnNames[$i]) $(if ($st.SortDescending) { [char]0x25BC } else { [char]0x25B2 })" } else { $columnNames[$i] }
         }
         $st.ListFilling = $true
+        $st.Shown.Clear()
         $results.BeginUpdate(); $results.Items.Clear()
         foreach ($r in $rows | Select-Object -First $maxRows) {
             $key = if ($st.ShowingPreview) { Get-CrLinkKey $r } else { '' }
+            if ($key) { [void]$st.Shown.Add($key) }
             $what = & $whatOf $r
             & $addRow $r $what $key ($st.ShowingPreview -and $what -eq 'Will be removed')
         }
@@ -355,8 +375,8 @@ function Add-CrRemediationTab {
         $st.Running = $false
         $bar.Visible = $false
         $problemText = if (@($p.problems).Count) { " $(@($p.problems).Count) site(s) couldn't be checked; they're in the log in its folder." } else { '' }
-        if ($p.state -eq 'Failed') {
-            $status.Text = "It stopped with a problem: $($p.error)"
+        if ($p.state -eq 'Failed' -and $st.Step -eq 'Preview') {
+            $status.Text = "The preview stopped with a problem: $($p.error)"
         }
         elseif ($st.Step -eq 'Preview') {
             $file = Join-Path $st.Folder 'preview.json'
@@ -365,7 +385,7 @@ function Add-CrRemediationTab {
                 $links = @($found.links)
                 $st.ToRemove = @($links | Where-Object remove).Count
                 $st.PreviewKey = $st.Key
-                & $fill   # the sites' "last checked" times have moved on
+                & $readLastChecked; & $fill   # the sites' "last checked" times have moved on
                 $st.Removed = $false
                 $st.Sheet = Join-Path $st.Folder 'preview.csv'
                 $st.Rows = $links
@@ -403,10 +423,19 @@ function Add-CrRemediationTab {
                 $results.Items.Clear(); $results.CheckBoxes = $false
                 $st.ListFilling = $false
                 & $render
+                $what = '{0:N0} removed, {1:N0} already gone, {2:N0} failed.' -f [int]$p.removed, [int]$p.gone, [int]$p.failed
+                if ([int]$p.skipped) { $what += ' {0:N0} left as they were because you unticked them.' -f [int]$p.skipped }
+                $status.Text = switch ($p.state) {
+                    'Completed' { "Done: $what" }
+                    'Failed' { "It stopped with a problem: $($p.error) $what The links it didn't get to were left as they were; the list shows what happened to each." }
+                    default { "Stopped part way: $what The rest were left as they were." }
+                }
             }
-            $what = '{0:N0} removed, {1:N0} already gone, {2:N0} failed.' -f [int]$p.removed, [int]$p.gone, [int]$p.failed
-            if ([int]$p.skipped) { $what += ' {0:N0} left as they were because you unticked them.' -f [int]$p.skipped }
-            $status.Text = if ($p.state -eq 'Completed') { "Done: $what" } else { "Stopped part way: $what The rest were left as they were." }
+            else {
+                # It stopped before removing anything (say signing in failed): the preview is still there to try again.
+                $listTools.Visible = $st.ToRemove -gt 0
+                $status.Text = "Remove didn't start: $(if ($p.error) { $p.error } else { 'it stopped before removing anything' }). Nothing was removed; press Remove to try again."
+            }
         }
         & $update
     }.GetNewClosure()
@@ -478,8 +507,15 @@ function Add-CrRemediationTab {
             $what = if ($going.Count -eq 1) { '1 sharing link' } else { '{0:N0} sharing links' -f $going.Count }
             $where = if ($siteCount -eq 1) { '1 site' } else { '{0:N0} sites' -f $siteCount }
             $left = if ($st.Unticked.Count) { " The $($st.Unticked.Count) you unticked are left as they are." } else { '' }
+            # Ticked links the list couldn't show (it shows at most $maxRows): said plainly, so nothing goes unseen.
+            $unseen = @($going | Where-Object { -not $st.Shown.Contains((Get-CrLinkKey $_)) }).Count
+            $hidden = if ($unseen) {
+                ("`n`n{0:N0} of these aren't shown in the list, which shows at most {1:N0}. They are in the spreadsheet (Open spreadsheet), " +
+                    'and will be removed too. To review them here, sort or hide the kept links to bring them into view, or narrow the choices and preview again.') -f $unseen, $maxRows
+            }
+            else { '' }
             $answer = [System.Windows.Forms.MessageBox]::Show($form,
-                "Remove $what from $($where)? These are the links ticked in the preview.$left Anyone using them loses access straight away, and this can't be undone.",
+                "Remove $what from $($where)? These are the links ticked in the preview.$left Anyone using them loses access straight away, and this can't be undone.$hidden",
                 'Remove sharing links', 'YesNo', 'Warning', 'Button2')
             if ($answer -ne 'Yes') { return }
             # The background step reads which links to leave alone from the fix's folder.
@@ -561,9 +597,12 @@ function Add-CrRemediationTab {
                 $timer.Start()
             }
             else {
-                & $showDone $latest.Progress
+                # Shown as the finished preview it is, even when a Remove was tried after it and stopped before removing anything.
+                $shownAs = if ($latest.Progress.step -eq 'Preview') { $latest.Progress } else { [pscustomobject]@{ step = 'Preview'; state = 'Completed'; problems = @() } }
+                & $showDone $shownAs
                 $made = $latest.PreviewedAt.ToLocalTime().ToString('MMMM d, h:mm tt')
-                $status.Text = "Your last preview, from $made. $($status.Text -replace '^Preview done: ', '')"
+                $tried = if ($latest.RemoveProblem) { " Remove was pressed but didn't start ($($latest.RemoveProblem)); nothing was removed." } else { '' }
+                $status.Text = "Your last preview, from $made.$tried $($status.Text -replace '^Preview done: ', '')"
             }
         }
         catch { }

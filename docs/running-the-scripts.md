@@ -65,6 +65,8 @@ The **Tenant** tab shows how your tenant is set up for sharing and Copilot, read
 
 **Show more** on a card opens the rest: why it matters, the trail to follow to reach the setting, a picture of that screen where there is one, and buttons to Microsoft's guide and to the page where it is changed. These settings don't change the score; they decide how easily files get shared too widely, so fixing them means fewer findings next time. If the settings can't be read, the tab says why and the scan still runs.
 
+The settings are read from your tenant the first time and kept, so the window opens quickly after that. The top of the tab says when they were read. Press **Refresh** to read them again, say after changing a setting in the admin center; the window closes and opens again on this tab.
+
 ## Run it without the window
 
 For a scheduled task, or any time you'd rather type. From PowerShell 7 in this folder, the scan runs in the PowerShell window itself and shows its progress there; Ctrl+C stops it. If Windows blocks the script, unblock the folder once with `Get-ChildItem -Recurse | Unblock-File`. Start.cmd doesn't need this.

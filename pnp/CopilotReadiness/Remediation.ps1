@@ -42,21 +42,67 @@ function Get-CrFixRoot {
     Join-Path $ResultsRoot 'fixes'
 }
 
-function Add-CrTeamsKinds {
+# How long the list of Teams and channel sites is kept before it's read again; Refresh on the Tenant tab reads it at once.
+$script:TeamsMarksDays = 7
+
+function Read-CrTeamsMarks {
     <#
-      Marks each SharePoint site that belongs to a Team (teams = 'Team') or to a private or
-      shared channel (teams = 'Channel'), from the admin center's list of sites. Other sites
-      get no mark. Uses its own connection, so the main one is left alone.
+      Which SharePoint sites belong to a Team ('Team') or to a private or shared channel
+      ('Channel'), from the admin center's list of sites: address -> mark. The admin center
+      leaves channel sites out of its list unless they're asked for by their own kinds
+      (TEAMCHANNEL#0 private, TEAMCHANNEL#1 shared), so those are asked for too. Uses its own
+      connection, so the main one is left alone.
     #>
-    param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Sites, [Parameter(Mandatory)] $Settings)
+    param([Parameter(Mandatory)] $Settings)
     $admin = Get-CrAdminUrl $Settings.sharePointUrl
     $connection = Invoke-CrCertificateWait { Connect-PnPOnline -Url $admin -ClientId $Settings.app.clientId -Tenant $Settings.tenant -Thumbprint $Settings.app.thumbprint -ReturnConnection -ErrorAction Stop }
-    $marks = @{}   # ignores case
+    $marks = [ordered]@{}
     foreach ($t in Get-PnPTenantSite -Connection $connection -ErrorAction Stop) {
         $mark = if ($t.IsTeamsChannelConnected -or "$($t.Template)" -like 'TEAMCHANNEL#*') { 'Channel' } elseif ($t.IsTeamsConnected) { 'Team' } else { $null }
-        if ($mark) { $marks["$($t.Url)".TrimEnd('/')] = $mark }
+        if ($mark) { $marks["$($t.Url)".TrimEnd('/').ToLowerInvariant()] = $mark }
     }
-    foreach ($s in $Sites) { $s | Add-Member -NotePropertyName teams -NotePropertyValue $marks["$($s.url)".TrimEnd('/')] -Force }
+    foreach ($template in 'TEAMCHANNEL#0', 'TEAMCHANNEL#1') {
+        try { foreach ($t in Get-PnPTenantSite -Connection $connection -Template $template -ErrorAction Stop) { $marks["$($t.Url)".TrimEnd('/').ToLowerInvariant()] = 'Channel' } }
+        catch { Write-Verbose "Couldn't list $template sites: $($_.Exception.Message)" }
+    }
+    $marks
+}
+
+function Get-CrTeamsMarks {
+    <#
+      The Teams and channel marks (Read-CrTeamsMarks), kept in the results folder so the window
+      doesn't list every site in the tenant each time it opens. Read again once they're a week
+      old, or with -Refresh. Returns address -> mark.
+    #>
+    param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ResultsRoot, [switch] $Refresh)
+    $path = Join-Path $ResultsRoot ("teams-sites-{0}.json" -f ($Settings.tenant -replace '[^A-Za-z0-9.-]', '_'))
+    if (-not $Refresh -and (Test-Path -LiteralPath $path)) {
+        try {
+            $saved = Read-CrJson $path
+            $readAt = [DateTimeOffset]::Parse($saved.readAt, [Globalization.CultureInfo]::InvariantCulture)
+            if ($readAt -gt [DateTimeOffset]::UtcNow.AddDays(-$script:TeamsMarksDays)) {
+                $marks = @{}
+                foreach ($p in $saved.marks.PSObject.Properties) { $marks[$p.Name] = "$($p.Value)" }
+                return $marks
+            }
+        }
+        catch { }   # unreadable: read again
+    }
+    $marks = Read-CrTeamsMarks $Settings
+    New-Item -ItemType Directory -Path $ResultsRoot -Force | Out-Null
+    Write-CrJson $path ([pscustomobject][ordered]@{ tenant = $Settings.tenant; readAt = [DateTimeOffset]::UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); marks = [pscustomobject]$marks })
+    $result = @{}
+    foreach ($k in $marks.Keys) { $result[$k] = $marks[$k] }
+    $result
+}
+
+function Add-CrTeamsKinds {
+    <#
+      Marks each site with the Teams and channel marks (Get-CrTeamsMarks): teams = 'Team' or
+      'Channel', or nothing for other sites.
+    #>
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Sites, [Parameter(Mandatory)] [hashtable] $Marks)
+    foreach ($s in $Sites) { $s | Add-Member -NotePropertyName teams -NotePropertyValue $Marks["$($s.url)".TrimEnd('/').ToLowerInvariant()] -Force }
 }
 
 function Get-CrSitePlace {
@@ -158,7 +204,8 @@ function New-CrFix {
         [Parameter(Mandatory)] $Options
     )
     $now = [DateTimeOffset]::UtcNow
-    $fixId = "$($now.ToString('yyyyMMdd''T''HHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0, 4))"
+    # Down to the millisecond, so the newest fix is always the last by name (see Get-CrLatestFix).
+    $fixId = "$($now.ToString('yyyyMMdd''T''HHmmssfff'))-$([guid]::NewGuid().ToString('N').Substring(0, 4))"
     $folder = Join-Path (Get-CrFixRoot $ResultsRoot) $fixId
     New-Item -ItemType Directory -Path $folder -Force | Out-Null
     Write-CrJson (Join-Path $folder 'fix.json') ([pscustomobject][ordered]@{
@@ -217,7 +264,7 @@ function Write-CrFixProgress {
 function Start-CrBackgroundFix {
     <#
       Runs Start.ps1 -RunFix for a fix's folder and step in a hidden PowerShell window, so
-      it carries on if the window is closed. What it prints goes to <step>.log in the folder.
+      it carries on if the window is closed. What it prints goes to <step>-<time>.log in the folder.
       Pace (Gentle, Normal or Fast, as for a scan) caps its requests a minute.
     #>
     param(
@@ -229,11 +276,15 @@ function Start-CrBackgroundFix {
     )
     if (Test-CrScanRunning $Folder) { throw 'This is already running.' }
     Remove-Item -LiteralPath (Join-Path $Folder 'stop.request') -ErrorAction SilentlyContinue
-    $log = Join-Path $Folder "$($Step.ToLowerInvariant())"
+    # Each run its own log, so running a step again never writes over the record of an earlier one.
+    $log = Join-Path $Folder "$($Step.ToLowerInvariant())-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     $arguments = '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$StartScript`"", '-RunFix', "`"$Folder`"", '-FixStep', $Step, '-FixPace', $Pace, '-SettingsPath', "`"$SettingsPath`""
     $process = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $arguments -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "$log.log" -RedirectStandardError "$log-errors.log"
-    Write-CrFixProgress -Folder $Folder -Step $Step -State Starting -Process $process
+    # Until the step itself reports, the window shows it signing in. If it has already reported
+    # (say it failed straight away), that is left as it is, so the real reason is shown.
+    $p = Read-CrProgress $Folder
+    if (-not $p -or [int]$p.pid -ne $process.Id) { Write-CrFixProgress -Folder $Folder -Step $Step -State Starting -Process $process }
     $process
 }
 
@@ -260,8 +311,11 @@ function Update-CrFixPace {
 function Get-CrLatestFix {
     <#
       The newest fix of this tenant, or nothing: its Folder, Step (Preview or Remove), Progress,
-      Running (a process is on it now), Previewed (its preview finished and its links haven't
-      been removed, so Remove can still be pressed) and PreviewedAt (when that preview finished).
+      Running (a process is on it now), Previewed (its preview finished and none of its links
+      have been removed, so Remove can still be pressed), PreviewedAt (when that preview
+      finished) and RemoveProblem (why a Remove that changed nothing didn't finish, if one
+      was tried: say the sign-in failed). A Remove that removed anything always leaves
+      removed.json, so a preview without one has had nothing removed.
     #>
     param([Parameter(Mandatory)] [string] $ResultsRoot, [Parameter(Mandatory)] [string] $Tenant)
     $root = Get-CrFixRoot $ResultsRoot
@@ -270,17 +324,22 @@ function Get-CrLatestFix {
         try {
             if ((Read-CrJson (Join-Path $dir.FullName 'fix.json')).tenant -ne $Tenant) { continue }
             $progress = Read-CrProgress $dir.FullName
+            $running = Test-CrScanRunning $dir.FullName
             $previewFile = Join-Path $dir.FullName 'preview.json'
-            $previewed = (Test-Path -LiteralPath $previewFile) -and -not (Test-Path -LiteralPath (Join-Path $dir.FullName 'removed.json')) -and
-                $progress -and $progress.step -eq 'Preview' -and $progress.state -eq 'Completed'
+            $previewed = -not $running -and (Test-Path -LiteralPath $previewFile) -and -not (Test-Path -LiteralPath (Join-Path $dir.FullName 'removed.json')) -and
+                $progress -and $progress.state -ne 'Starting'
             $at = if ($previewed) { [DateTimeOffset]::Parse((Read-CrJson $previewFile).finishedAt, [Globalization.CultureInfo]::InvariantCulture) }
+            $removeProblem = if ($previewed -and $progress.step -eq 'Remove') {
+                if ($progress.error) { "$($progress.error)" } else { 'it stopped before removing anything' }
+            }
             return [pscustomobject]@{
-                Folder      = $dir.FullName
-                Step        = if ($progress -and $progress.step -eq 'Remove') { 'Remove' } else { 'Preview' }
-                Progress    = $progress
-                Running     = Test-CrScanRunning $dir.FullName
-                Previewed   = [bool]$previewed
-                PreviewedAt = $at
+                Folder        = $dir.FullName
+                Step          = if ($previewed) { 'Preview' } elseif ($progress -and $progress.step -eq 'Remove') { 'Remove' } else { 'Preview' }
+                Progress      = $progress
+                Running       = $running
+                Previewed     = [bool]$previewed
+                PreviewedAt   = $at
+                RemoveProblem = $removeProblem
             }
         }
         catch { continue }   # a folder that isn't a fix, or is half written
@@ -521,17 +580,6 @@ function Get-CrSiteLinkInventory {
     [pscustomobject]@{ Links = $links.ToArray(); Libraries = $bookmarks; Changed = $tally.Changed; Mode = $mode; Resync = $tally.Resync }
 }
 
-function Get-CrSiteLinks {
-    <# Every sharing link on one site or OneDrive, read in full, with what would happen to it under Options and Cutoff. #>
-    param(
-        [Parameter(Mandatory)] $Site,
-        [Parameter(Mandatory)] $Options,
-        [Nullable[DateTimeOffset]] $Cutoff,
-        [scriptblock] $OnItem
-    )
-    foreach ($r in (Get-CrSiteLinkInventory -Site $Site -OnItem $OnItem).Links) { Add-CrLinkDecision -Record $r -Options $Options -Cutoff $Cutoff }
-}
-
 # ── The two steps ───────────────────────────────────────────────────────────
 
 function Export-CrFixCsv {
@@ -692,18 +740,39 @@ function Invoke-CrLinkRemove {
         else { $todo.Add($link) }
     }
     $counts = @{ toRemove = $todo.Count; removed = 0; gone = 0; failed = 0; skipped = $skipped }
+    # The record of what was removed, written however the step ends: removing can't be undone, so
+    # this matters most. Links it never got to are listed too, as not removed. Each part is written
+    # on its own, so one that fails (a file held open by a sync tool, say) doesn't stop the others;
+    # every link's result is also in this run's own log as it happens.
     $finish = {
-        param([string] $State)
+        param([string] $State, [string] $ErrorText)
+        $tried = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($d in $done) { [void]$tried.Add((Get-CrLinkKey $d)) }
+        $attempted = $done.Count - $skipped
+        foreach ($link in $todo) {
+            if ($tried.Contains((Get-CrLinkKey $link))) { continue }
+            $copy = $link | Select-Object *
+            $copy | Add-Member -NotePropertyName result -NotePropertyValue 'Not removed: it stopped before getting to this one'
+            $done.Add($copy)
+        }
         $all = $done.ToArray()
-        Write-CrJson (Join-Path $Folder 'removed.json') ([pscustomobject][ordered]@{
-                finishedAt = [DateTimeOffset]::UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
-                state      = $State
-                links      = $all
-            })
-        Export-CrFixCsv -Rows $all -Path (Join-Path $Folder 'removed.csv') -Results
-        Write-CrFixProgress -Folder $Folder -Step Remove -State $State -Total $todo.Count -Done ($done.Count - $skipped) -Counts $counts
+        try {
+            Write-CrJson (Join-Path $Folder 'removed.json') ([pscustomobject][ordered]@{
+                    finishedAt = [DateTimeOffset]::UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+                    state      = $State
+                    error      = $ErrorText
+                    links      = $all
+                })
+        }
+        catch { Write-Host "$(Get-Date -Format s) Couldn't save removed.json: $($_.Exception.Message)" }
+        try { Export-CrFixCsv -Rows $all -Path (Join-Path $Folder 'removed.csv') -Results }
+        catch { Write-Host "$(Get-Date -Format s) Couldn't save removed.csv: $($_.Exception.Message)" }
+        try { Write-CrFixProgress -Folder $Folder -Step Remove -State $State -Total $todo.Count -Done $attempted -Counts $counts -ErrorText $ErrorText }
+        catch { Write-Host "$(Get-Date -Format s) Couldn't save progress.json: $($_.Exception.Message)" }
     }
 
+    $ended = 'Failed'
+    $problem = $null
     try {
         foreach ($group in $todo | Group-Object site, listId, itemId) {
             $first = $group.Group[0]
@@ -736,11 +805,10 @@ function Invoke-CrLinkRemove {
                 $done.Add($copy)
             }
         }
+        $ended = 'Completed'
     }
-    catch [System.OperationCanceledException] {
-        & $finish 'Cancelled'
-        return
-    }
-    & $finish 'Completed'
-    Write-Host "$(Get-Date -Format s) Remove done: $($counts.removed) removed, $($counts.gone) already gone, $($counts.failed) failed, $skipped left as unticked."
+    catch [System.OperationCanceledException] { $ended = 'Cancelled' }
+    catch { $problem = $_.Exception.Message; throw }
+    finally { & $finish $ended $problem }
+    Write-Host "$(Get-Date -Format s) Remove $(if ($ended -eq 'Completed') { 'done' } else { 'stopped' }): $($counts.removed) removed, $($counts.gone) already gone, $($counts.failed) failed, $skipped left as unticked."
 }

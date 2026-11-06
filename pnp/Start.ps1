@@ -152,7 +152,10 @@ if ($RunFix) {
     }
     catch {
         Write-Host "$(Get-Date -Format s) $($_.Exception.Message)"
-        Write-CrFixProgress -Folder $RunFix -Step $FixStep -State Failed -ErrorText $_.Exception.Message
+        # A Remove that stops records its own ending, with how many it removed; this covers the rest,
+        # such as signing in, without writing over that record.
+        $p = Read-CrProgress $RunFix
+        if (-not $p -or $p.state -in 'Starting', 'Running') { Write-CrFixProgress -Folder $RunFix -Step $FixStep -State Failed -ErrorText $_.Exception.Message }
         throw
     }
     return
@@ -439,8 +442,10 @@ else {
         # Read from the tenant the first time, then kept; the Tenant tab's Refresh button reads them again.
         if (-not (Test-Path -LiteralPath (Get-CrTenantSettingsPath $resultsFolder $settings.tenant))) { Write-Host 'Reading the tenant''s sharing settings...' }
         $tenantRead = Get-CrSavedTenantSettings -Settings $settings -ResultsRoot $resultsFolder
-        # Which sites belong to a Team or a channel, for the Remediation tab's filters. Without it they show as SharePoint sites.
-        $teamsKnown = try { Add-CrTeamsKinds $all $settings; $true } catch { Write-Host "Couldn't tell which sites belong to Teams: $($_.Exception.Message)"; $false }
+        # Which sites belong to a Team or a channel, for the Remediation tab's filters; kept for a week, and
+        # read again with the Tenant tab's Refresh. Without it they show as SharePoint sites.
+        $teamsKnown = try { Add-CrTeamsKinds $all (Get-CrTeamsMarks -Settings $settings -ResultsRoot $resultsFolder); $true }
+        catch { Write-Host "Couldn't tell which sites belong to Teams: $($_.Exception.Message)"; $false }
         & $closeActivity
     }
 }
@@ -471,26 +476,35 @@ $startTab = $null
         'RefreshTenant' {
             Write-Host 'Reading the tenant''s sharing settings again...'
             $tenantRead = Get-CrSavedTenantSettings -Settings $settings -ResultsRoot $resultsFolder -Refresh
+            $teamsKnown = try { Add-CrTeamsKinds $all (Get-CrTeamsMarks -Settings $settings -ResultsRoot $resultsFolder -Refresh); $true }
+            catch { Write-Host "Couldn't tell which sites belong to Teams: $($_.Exception.Message)"; $false }
             $startTab = 'Tenant'
             continue window
         }
         'Uninstall' {
             # Confirmed in the window already. An admin signs in; if that's cancelled or fails, nothing has changed.
+            # Once the app is gone from the tenant, the messages say so, whatever happens on this computer after.
             Add-Type -AssemblyName System.Windows.Forms
             $tenantName = $settings.tenant
+            $thumbprint = "$($settings.app.thumbprint)"
+            $removal = $null
             try {
                 Write-Host "Removing Copilot Readiness from $tenantName. A browser window asks a Global Administrator to sign in."
-                $deleted = Uninstall-CrApp -Settings $settings -DeviceLogin:$DeviceLogin
-                Save-CrSettings $SettingsPath $settings
+                $removal = Uninstall-CrApp -Settings $settings -DeviceLogin:$DeviceLogin
+                $left = @()
+                if ($removal.CertificateProblem) { $left += "This computer's certificate for it couldn't be deleted ($($removal.CertificateProblem)). Delete it by hand: certificate thumbprint $thumbprint in your personal certificates (certmgr.msc)." }
+                try { Save-CrSettings $SettingsPath $settings }
+                catch { $left += "settings.json couldn't be saved ($($_.Exception.Message)), so it still names the deleted app. Close anything that has it open, such as OneDrive syncing, then run setup again; or clear the app's clientId and thumbprint in settings.json by hand." }
                 try { Disconnect-PnPOnline } catch { }
-                $done = if ($deleted) { "Copilot Readiness has been removed from $tenantName, and this computer's certificate for it is deleted." }
-                else { "The app was already gone from $tenantName. This computer's certificate for it is deleted." }
-                Write-Host $done -ForegroundColor Green
-                [void][System.Windows.Forms.MessageBox]::Show("$done`n`nAn admin can bring the app back from Entra admin center > App registrations > Deleted applications within 30 days. To use Copilot Readiness again, run it and set it up.", 'Copilot Readiness removed', 'OK', 'Information')
+                $done = if ($removal.Deleted) { "Copilot Readiness has been removed from $tenantName." } else { "The app was already gone from $tenantName." }
+                $done += if ($left.Count) { "`n`nBut this computer couldn't finish tidying up:`n  - $($left -join "`n  - ")" } else { " This computer's certificate for it is deleted." }
+                Write-Host $done -ForegroundColor $(if ($left.Count) { 'Yellow' } else { 'Green' })
+                [void][System.Windows.Forms.MessageBox]::Show("$done`n`nAn admin can bring the app back from Entra admin center > App registrations > Deleted applications within 30 days. To use Copilot Readiness again, run it and set it up.", 'Copilot Readiness removed', 'OK', $(if ($left.Count) { 'Warning' } else { 'Information' }))
             }
             catch {
+                # Only reached when the tenant step itself failed (signing in, or deleting the app), so nothing has changed.
                 Write-Host "Couldn't remove it: $($_.Exception.Message)" -ForegroundColor Red
-                [void][System.Windows.Forms.MessageBox]::Show("Couldn't remove Copilot Readiness from $($tenantName). Nothing was changed on this computer.`n`n$($_.Exception.Message)", 'Copilot Readiness', 'OK', 'Warning')
+                [void][System.Windows.Forms.MessageBox]::Show("Couldn't remove Copilot Readiness from $($tenantName). Nothing was changed, in the tenant or on this computer.`n`n$($_.Exception.Message)", 'Copilot Readiness', 'OK', 'Warning')
             }
             return
         }

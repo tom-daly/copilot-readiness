@@ -35,7 +35,7 @@ Your web browser opens and shows Microsoft's own pages:
 
 The page opens in your default browser, in whichever profile it last used, so check any other browser windows if you don't see it. If it shows the wrong account, choose **Use another account**. If you use a separate browser profile for this tenant, make that the last one you used before you start.
 
-This creates an app called **Copilot Readiness Scanner (PnP)** in your tenant, with a certificate kept in your Windows certificate store. The app can read every site and who it is shared with. It never changes anything. The permissions are listed at the top of `Start.ps1`, and the details are saved in `settings.json`.
+This creates an app called **Copilot Readiness Scanner (PnP)** in your tenant, with a certificate kept in your Windows certificate store. The app can read every site and who it is shared with. A scan never changes anything; the only thing that does is the Remediation tab's **Remove** button, which removes sharing links you chose after showing you a preview ([Fixing sharing links](fixing-sharing-links.md)). The permissions are listed at the top of `Start.ps1`, and the details are saved in `settings.json`.
 
 ## Wait while Microsoft switches it on
 

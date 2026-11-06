@@ -197,8 +197,8 @@ $removing = [pscustomobject]@{
     app    = [pscustomobject]@{ name = 'Copilot Readiness Scanner (PnP)'; clientId = '11111111-2222-3333-4444-555555555555'; thumbprint = 'NOT-ON-THIS-PC'; createdAt = '2026-01-01' }
     otherTenants = @([pscustomobject]@{ tenant = 'fabrikam.onmicrosoft.com'; clientId = 'other'; thumbprint = 'OTHER' })
 }
-$deleted = Uninstall-CrApp -Settings $removing -Graph $fakeGraph
-Check "the app is found by its ID and deleted (calls: $($calls -join ' | '))" ($deleted -eq 1 -and $calls[0] -like "GET applications?`$filter=appId eq '11111111-2222-3333-4444-555555555555'*" -and $calls[1] -eq 'DELETE applications/obj-1')
+$removal = Uninstall-CrApp -Settings $removing -Graph $fakeGraph
+Check "the app is found by its ID and deleted (calls: $($calls -join ' | '))" ($removal.Deleted -eq 1 -and -not $removal.CertificateProblem -and $calls[0] -like "GET applications?`$filter=appId eq '11111111-2222-3333-4444-555555555555'*" -and $calls[1] -eq 'DELETE applications/obj-1')
 Check 'settings forget the app, other tenants kept' (-not $removing.app.clientId -and -not $removing.app.thumbprint -and $removing.otherTenants[0].clientId -eq 'other')
 $calls.Clear()
 $failing = { param($Method, $Path, $Body) if ($Method -eq 'DELETE') { throw 'Forbidden' }; [pscustomobject]@{ value = @([pscustomobject]@{ id = 'obj-1' }) } }

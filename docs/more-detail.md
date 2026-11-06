@@ -43,6 +43,12 @@ The first run writes this file. You can change it with any text editor:
 
 ## Removing it
 
+The **Settings** tab has a button for this: **Remove Copilot Readiness from this tenant**. A Global Administrator signs in, and it deletes the app from the tenant and this PC's certificate for it. Everyone using it, on any PC, loses access straight away, and it has to be set up again to be used again. Entra keeps a deleted app for 30 days, so an admin can bring it back from App registrations > Deleted applications in that time. Past scans on the PC are kept.
+
+Do this in each tenant you set up (sign out to switch tenants). Then, on each other PC that used it, delete its certificate: run `certmgr.msc`, open Personal > Certificates, and remove the ones issued to **Copilot Readiness Scanner (PnP)**. Finally, delete this folder.
+
+To do it by hand instead:
+
 1. Delete the **Copilot Readiness Scanner (PnP)** app in the Entra admin center under App registrations, in each tenant you set up.
-2. On each PC you used, delete its certificate: run `certmgr.msc`, open Personal > Certificates, and remove the ones issued to **Copilot Readiness Scanner (PnP)**.
+2. On each PC you used, delete its certificate as above.
 3. Delete this folder.

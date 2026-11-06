@@ -248,6 +248,55 @@ try {
     # ── The window can tell which sites were checked before ──
     Check 'sites previewed before are known' ((Get-CrLinkCacheTime -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -SiteUrl $od) -and -not (Get-CrLinkCacheTime -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -SiteUrl $locked))
 
+    # ── A Remove that fails part way still records what it removed ──
+    # Saving progress fails the second time a file is reached (say a sync tool holds the file open).
+    $broken = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[0], $sites[2]) -Options ([pscustomobject]@{ links = @('Anyone', 'Organization', 'SpecificPeople'); age = 'Any' })
+    Invoke-CrFix -Folder $broken -Step Preview
+    $toGo = @((Read-CrJson (Join-Path $broken 'preview.json')).links | Where-Object remove).Count
+    & $module {
+        $script:RealProgress = ${function:Write-CrFixProgress}
+        $script:ProgressCalls = 0
+        function script:Write-CrFixProgress {
+            param([string] $Folder, [string] $Step, [string] $State, [int] $Total, [int] $Done, [string] $Current, [hashtable] $Counts, [object[]] $Problems, [string] $ErrorText, $Process)
+            if ($State -eq 'Running' -and ++$script:ProgressCalls -eq 2) { throw [System.IO.IOException]::new('The file is in use by another process.') }
+            & $script:RealProgress @PSBoundParameters
+        }
+    }
+    $threw = try { Invoke-CrFix -Folder $broken -Step Remove; $false } catch { $_.Exception.Message -like '*in use*' }
+    & $module { Set-Item function:script:Write-CrFixProgress $script:RealProgress }
+    $rec = Read-CrJson (Join-Path $broken 'removed.json')
+    $removedFirst = @($rec.links | Where-Object result -EQ 'Removed').Count
+    $notReached = @($rec.links | Where-Object { $_.result -like 'Not removed: it stopped*' }).Count
+    Check "the problem still stops it, and is reported (threw $threw)" $threw
+    Check "the record is kept: what was removed, and what it never got to ($removedFirst removed, $notReached not reached, of $toGo)" ($rec.state -eq 'Failed' -and $rec.error -like '*in use*' -and $removedFirst -ge 1 -and $notReached -ge 1 -and @($rec.links).Count -eq $toGo)
+    Check 'the spreadsheet of results is written too' (Test-Path (Join-Path $broken 'removed.csv'))
+    $bp = Read-CrProgress $broken
+    Check "the window is told it failed, with the counts ($($bp.state), removed $($bp.removed))" ($bp.state -eq 'Failed' -and [int]$bp.removed -eq $removedFirst -and $bp.error -like '*in use*')
+    Check 'that preview is not offered for Remove again' (-not (Get-CrLatestFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com').Previewed)
+
+    # ── A Remove that stops before removing anything keeps its preview ──
+    $unstarted = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options $wide180
+    Invoke-CrFix -Folder $unstarted -Step Preview
+    Write-CrFixProgress -Folder $unstarted -Step Remove -State Failed -ErrorText 'Sign-in failed'
+    $l = Get-CrLatestFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com'
+    Check "a Remove that never started keeps its preview, and says why ($($l.RemoveProblem))" ($l.Folder -eq $unstarted -and $l.Previewed -and $l.Step -eq 'Preview' -and $l.RemoveProblem -eq 'Sign-in failed')
+
+    # ── Which sites belong to Teams and channels: kept for a week, read again on Refresh ──
+    & $module {
+        $script:MarkReads = 0
+        function script:Read-CrTeamsMarks { $script:MarkReads++; [ordered]@{ 'https://contoso.sharepoint.com/sites/finance' = 'Team'; 'https://contoso.sharepoint.com/sites/finance-payroll' = 'Channel' } }
+    }
+    $tenantSettings = [pscustomobject]@{ tenant = 'contoso.onmicrosoft.com'; sharePointUrl = $sp }
+    $m1 = Get-CrTeamsMarks -Settings $tenantSettings -ResultsRoot $work
+    $m2 = Get-CrTeamsMarks -Settings $tenantSettings -ResultsRoot $work
+    $reads = & $module { $script:MarkReads }
+    Check "the Teams list is read once, then kept (read $reads time(s))" ($reads -eq 1 -and $m2['https://contoso.sharepoint.com/sites/finance-payroll'] -eq 'Channel')
+    $null = Get-CrTeamsMarks -Settings $tenantSettings -ResultsRoot $work -Refresh
+    Check 'Refresh reads it again' ((& $module { $script:MarkReads }) -eq 2)
+    $marked = @([pscustomobject]@{ url = 'https://contoso.sharepoint.com/sites/Finance-Payroll'; kind = 'SharePoint' }, [pscustomobject]@{ url = 'https://contoso.sharepoint.com/sites/other'; kind = 'SharePoint' })
+    Add-CrTeamsKinds $marked $m1
+    Check 'marks match whatever the case of the address' ((Get-CrSitePlace $marked[0]) -eq 'Channel' -and (Get-CrSitePlace $marked[1]) -eq 'SharePoint')
+
     # ── The scan lists ignore the fixes folder ──
     Check 'past scans ignore fixes' (-not @(Get-CrPastScans $work).Count -and -not (Get-CrUnfinishedScan $work) -and -not (Get-CrRunningScan $work))
 }

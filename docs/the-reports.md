@@ -38,3 +38,5 @@ To share a report, send the whole folder and open it from your computer. Some vi
 Some sites are listed apart under **Sites left out**, each with the reason, and aren't scored. Sites an admin has archived (Microsoft 365 Archive) or locked are left out because nobody can open them, Copilot included, so they aren't retried either. The tenant's app catalog is left out on purpose: everyone needs to be able to read it to add apps, and it holds app packages rather than business documents. Sites that couldn't be read for any other reason are listed with the reason, and the next scan tries them again.
 
 **Stuck?** See [If something goes wrong](if-something-goes-wrong.md).
+
+**Next:** [Fixing sharing links](fixing-sharing-links.md)

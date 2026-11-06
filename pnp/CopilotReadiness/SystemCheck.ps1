@@ -6,6 +6,7 @@ $script:PnPVersion = [version]'3.4.1'
 $script:PowerShellMinimum = [version]'7.5'
 
 function Get-CrPnPRequired { $script:PnPVersion }
+function Get-CrPowerShellMinimum { $script:PowerShellMinimum }
 
 function New-CrCheck {
     <# State: Ok, Info, Warning (can go ahead), Problem (can't), Fixable (Fix says how). #>
@@ -75,7 +76,7 @@ function Get-CrSystemCheck {
         $checks.Add((New-CrCheck 'Results folder' Ok $ResultsFolder))
     }
     catch {
-        $checks.Add((New-CrCheck 'Results folder' Problem "Can't save results in $ResultsFolder ($($_.Exception.Message)). Change scan.resultsFolder in settings.json."))
+        $checks.Add((New-CrCheck 'Results folder' Problem "Can't save results in $ResultsFolder ($($_.Exception.Message)). If it's on a network or USB drive, connect the drive and try again. Otherwise change scan.resultsFolder in settings.json."))
     }
 
     $checks.ToArray()

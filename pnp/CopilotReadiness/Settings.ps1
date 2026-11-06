@@ -20,6 +20,8 @@ function New-CrSettings {
             sites         = @()
             staleDays     = (Get-CrRuleBook).thresholds.staleDays
             resultsFolder = 'results'
+            # The same path as resultsFolder when it was carried over from an older copy of the program (Restore-CrRememberedSetup).
+            resultsCarried = ''
             # Gentle, Normal or Fast: how hard a scan works the tenant (Get-CrPaces).
             pace          = 'Normal'
         }
@@ -32,7 +34,8 @@ function Read-CrSettings {
     $settings = New-CrSettings
     if (-not (Test-Path -LiteralPath $Path)) { return $settings }
 
-    $saved = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json
+    # Dates stay as written: read as dates, they lose their time zone, and how old an app is comes out hours wrong.
+    $saved = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json -DateKind String
     foreach ($p in $saved.PSObject.Properties) {
         if ($p.Name -in 'app', 'scan' -and $p.Value) {
             foreach ($inner in $p.Value.PSObject.Properties) { $settings.($p.Name) | Add-Member -NotePropertyName $inner.Name -NotePropertyValue $inner.Value -Force }
@@ -49,6 +52,166 @@ function Read-CrSettings {
 function Save-CrSettings {
     param([Parameter(Mandatory)] [string] $Path, [Parameter(Mandatory)] $Settings)
     $Settings | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding utf8
+}
+
+function Get-CrRememberedSetupPath {
+    <#
+      Where this Windows account remembers its setup, outside any one copy of the program, so
+      that a newer version unzipped to a new folder can pick it up. It holds what settings.json
+      holds: tenant names, app IDs and certificate thumbprints. No keys or passwords.
+    #>
+    param([string] $Root = $env:LOCALAPPDATA)
+    if (-not $Root) { return $null }
+    Join-Path $Root 'CopilotReadiness\setup.json'
+}
+
+function Get-CrNewestScanName {
+    <# The newest scan's folder name in a results folder, or nothing. Their names start with when they started, so they sort by time. #>
+    param([Parameter(Mandatory)] [string] $Folder)
+    @(Get-ChildItem -LiteralPath $Folder -Directory -ErrorAction SilentlyContinue | Where-Object Name -Match '^\d{8}T\d{6}-' | ForEach-Object Name | Sort-Object -Descending) | Select-Object -First 1
+}
+
+function New-CrTenantEntry {
+    <# The current tenant as it's kept under otherTenants: its name, address and app. #>
+    param([Parameter(Mandatory)] $Settings)
+    [pscustomobject][ordered]@{ tenant = $Settings.tenant; sharePointUrl = $Settings.sharePointUrl; clientId = $Settings.app.clientId; thumbprint = $Settings.app.thumbprint }
+}
+
+function Merge-CrRememberedTenants {
+    <#
+      Puts what's remembered in Before over the other tenants in Copy. Only the current tenant is
+      known to be up to date in a copy, because it was just used. So running an older copy once
+      doesn't lose a tenant added since, or bring back a certificate that's been replaced, or blank
+      a working app. The current tenant with no app means it was removed, and it's forgotten.
+    #>
+    param([Parameter(Mandatory)] $Copy, [Parameter(Mandatory)] $Before)
+    $kept = @(@(New-CrTenantEntry $Before) + @($Before.otherTenants) | Where-Object { $_.tenant -and $_.clientId -and $_.tenant -ne $Copy.tenant })
+    $keptNames = @($kept | ForEach-Object tenant)
+    $Copy.otherTenants = @(@($Copy.otherTenants | Where-Object { $keptNames -notcontains $_.tenant }) + $kept)
+}
+
+function Select-CrRememberedResults {
+    <#
+      Which results folder to remember. A copy on its own results folder, or on ones carried over,
+      only replaces remembered results once it has a newer scan than they do, or with TakeOver: the
+      person chose it. Remembered results it can't see stay remembered, as they may only be unplugged;
+      the next version asks. They're only looked for if there's a newer scan to offer, as a share
+      that isn't answering takes a while to say so.
+    #>
+    param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ResultsFolder, [string] $Remembered, [switch] $TakeOver, [Parameter(Mandatory)] [scriptblock] $Exists)
+    $folder = "$($Settings.scan.resultsFolder)"
+    $carried = "$($Settings.scan.resultsCarried)"
+    # Otherwise the folder was set on purpose: by hand, or by moving away from carried results.
+    $notChosen = if ($carried) { $carried -eq $folder } else { -not [IO.Path]::IsPathRooted($folder) }
+    if ($TakeOver -or -not $Remembered -or $Remembered -eq $ResultsFolder -or -not $notChosen) { return $ResultsFolder }
+    $ownNewest = Get-CrNewestScanName $ResultsFolder
+    if (-not $ownNewest -or -not (& $Exists $Remembered)) { return $Remembered }
+    if ($ownNewest -gt (Get-CrNewestScanName $Remembered)) { $ResultsFolder } else { $Remembered }
+}
+
+function Save-CrRememberedSetup {
+    <#
+      Remembers these settings for the next version, with where the results are kept as a full
+      path so it carries on using them, and the rule book's stale-site limit, to tell later whether
+      this one was only the default. With no app left to remember, it forgets instead; if it can't,
+      it says so. The file only changes when there's something new, and is never left half written.
+    #>
+    param(
+        [Parameter(Mandatory)] $Settings,
+        [Parameter(Mandatory)] [string] $ResultsFolder,
+        [string] $Path = (Get-CrRememberedSetupPath),
+        [switch] $TakeOver,
+        [scriptblock] $Exists = { param($path) Test-Path -LiteralPath $path }
+    )
+    if (-not $Path) { return }
+    $copy = $Settings | ConvertTo-Json -Depth 5 | ConvertFrom-Json -DateKind String
+    # A file that can't be opened right now is left alone and this says so. One that opens but makes no sense is replaced.
+    $before = if (Test-Path -LiteralPath $Path) {
+        $null = [IO.File]::ReadAllBytes($Path)
+        try { Read-CrSettings $Path } catch { $null }
+    }
+    if ($before) {
+        Merge-CrRememberedTenants -Copy $copy -Before $before
+        $ResultsFolder = Select-CrRememberedResults -Settings $Settings -ResultsFolder $ResultsFolder -Remembered "$($before.scan.resultsFolder)" -TakeOver:$TakeOver -Exists $Exists
+    }
+    if (-not $copy.app.clientId -and -not @($copy.otherTenants | Where-Object { $_.clientId }).Count) {
+        if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
+        return
+    }
+    $copy.scan.resultsFolder = $ResultsFolder
+    $copy.scan | Add-Member -NotePropertyName staleDaysDefault -NotePropertyValue (Get-CrRuleBook).thresholds.staleDays -Force
+    $now = ConvertTo-Json -InputObject $copy -Depth 20
+    if ((Test-Path -LiteralPath $Path) -and "$(Get-Content -LiteralPath $Path -Raw -Encoding utf8)".Trim() -ceq $now.Trim()) { return }
+    New-Item -ItemType Directory -Path (Split-Path $Path) -Force | Out-Null
+    Write-CrJson $Path $copy
+}
+
+function Test-CrCertificateUsable {
+    <# Whether a certificate can sign in: it's there, has its private key and hasn't expired. #>
+    param($Certificate)
+    [bool]($Certificate -and $Certificate.HasPrivateKey -and $Certificate.NotAfter -gt (Get-Date))
+}
+
+function Restore-CrRememberedSetup {
+    <#
+      A copy of the program with no settings.json of its own takes the remembered setup: every
+      tenant, and where the results are, so it uses the same apps and certificates with nothing
+      to set up. A tenant whose app or certificate has gone from this PC is the only one that
+      needs setting up again: its app is cleared, so that happens by itself when it's chosen.
+      If that's the last-used tenant, this starts on another that still works. A stale-site limit
+      that was only the old rule book's default follows the new rule book. Returns Tenant and
+      Ready (whether that tenant can sign in now), or nothing if there's nothing to restore. A remembered setup that can't be read throws, so the caller can say so.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $SettingsPath,
+        [string] $Path = (Get-CrRememberedSetupPath),
+        [scriptblock] $HasCertificate = { param($thumbprint) Test-CrCertificateUsable (Get-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -ErrorAction SilentlyContinue) }
+    )
+    if ((Test-Path -LiteralPath $SettingsPath) -or -not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+    $saved = Read-CrSettings $Path
+    if (-not $saved.tenant) { return }
+    if ($saved.scan.PSObject.Properties['staleDaysDefault']) {
+        if ("$($saved.scan.staleDays)" -eq "$($saved.scan.staleDaysDefault)") { $saved.scan.staleDays = (Get-CrRuleBook).thresholds.staleDays }
+        $saved.scan.PSObject.Properties.Remove('staleDaysDefault')
+    }
+    $works = { param($clientId, $thumbprint) [bool]($clientId -and $thumbprint -and (& $HasCertificate "$thumbprint")) }
+    if (-not (& $works $saved.app.clientId $saved.app.thumbprint)) {
+        $other = @($saved.otherTenants | Where-Object { & $works $_.clientId $_.thumbprint }) | Select-Object -First 1
+        if ($other) { Set-CrTenant $saved $other.tenant }
+    }
+    if (-not (& $works $saved.app.clientId $saved.app.thumbprint)) { $saved.app.clientId = ''; $saved.app.thumbprint = '' }
+    foreach ($o in @($saved.otherTenants)) {
+        if (-not (& $works $o.clientId $o.thumbprint)) { $o.clientId = ''; $o.thumbprint = '' }
+    }
+    if ([IO.Path]::IsPathRooted("$($saved.scan.resultsFolder)")) { $saved.scan.resultsCarried = "$($saved.scan.resultsFolder)" }
+    Save-CrSettings $SettingsPath $saved
+    [pscustomobject]@{ Tenant = "$($saved.tenant)"; Ready = [bool]$saved.app.clientId }
+}
+
+function Get-CrCarriedResults {
+    <# The results folder in use that was carried over from an older copy of the program, or nothing. #>
+    param([Parameter(Mandatory)] $Settings)
+    $carried = "$($Settings.scan.resultsCarried)"
+    if ($carried -and $carried -eq "$($Settings.scan.resultsFolder)") { $carried }
+}
+
+function Get-CrMissingResults {
+    <#
+      The results folder carried over from an older copy of the program, if it can't be found. It
+      may have been deleted, or be on a drive that isn't connected, or behind a share that's not
+      answering, and nothing here can tell which, so this only reports it. Start.ps1 asks. A results
+      folder set by hand is left alone, and is created as usual.
+    #>
+    param([Parameter(Mandatory)] $Settings, [scriptblock] $Exists = { param($path) Test-Path -LiteralPath $path })
+    $carried = Get-CrCarriedResults -Settings $Settings
+    if ($carried -and -not (& $Exists $carried)) { $carried }
+}
+
+function Set-CrOwnResults {
+    <# Goes back to this copy's own results folder, once the person has said to. The caller saves the settings. #>
+    param([Parameter(Mandatory)] $Settings)
+    $Settings.scan.resultsFolder = 'results'
+    $Settings.scan.resultsCarried = ''
 }
 
 function ConvertTo-CrTenantName {
@@ -146,7 +309,7 @@ function Set-CrTenant {
         $app = Get-CrTenantApp $Settings $Tenant
         $others = @($Settings.otherTenants | Where-Object { $_.tenant -ne $Settings.tenant -and $_.tenant -ne $Tenant })
         if ($Settings.app.clientId) {
-            $others += [pscustomobject][ordered]@{ tenant = $Settings.tenant; sharePointUrl = $Settings.sharePointUrl; clientId = $Settings.app.clientId; thumbprint = $Settings.app.thumbprint }
+            $others += New-CrTenantEntry $Settings
         }
         $Settings.otherTenants = @($others)
         $Settings.sharePointUrl = $app.sharePointUrl

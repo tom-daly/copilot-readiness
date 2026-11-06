@@ -16,13 +16,13 @@ The **Table** view shows the same rows as the spreadsheets below, as tables: cli
 
 ## Open an old report
 
-Open the **Past scans** tab, pick a scan and press **Open report**, or double-click it. It lists every scan of the tenant run on this PC, newest first, with its score and what it found. Pick one that stopped and press **Continue scan** to finish it. **Remove** sends the scans you pick to the Recycle Bin.
+Open the **Past scans** tab, pick a scan and press **Open report**, or double-click it. It lists every scan of the tenant run on this PC, newest first, with its score and what it found. Pick one that stopped and press **Continue scan** to finish it. One marked **Stopped, older rules** or **Stopped, newer rules** can't be continued here, because it started under different rules. **Remove** sends the scans you pick to the Recycle Bin.
 
 ![The Past scans tab, with Open report marked in red](pictures/08-past-scans.png)
 
 ## The files it saves
 
-Each scan gets its own folder under `results`:
+Each scan gets its own folder under `results`, and a new scan never changes an earlier one. A newer version of the program keeps using the same `results` folder, even if it's in the older version's folder:
 
 - `report.html`: the report. It links to the files below, so keep them together.
 - `findings.csv`: every finding with what to do about it. Opens in Excel.

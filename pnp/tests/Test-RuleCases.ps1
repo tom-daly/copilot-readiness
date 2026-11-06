@@ -131,6 +131,17 @@ foreach ($r in $book.rules) {
     }
 }
 
+# A stopped scan can only be continued under the rule book version it started with, so that number has to
+# go up whenever the rule book changes. rules/rulebook.lock.json says which version these exact rules are.
+Assert-Case 'rule book: its version goes up when it changes' {
+    $lockPath = Join-Path (Split-Path $CasesPath) 'rulebook.lock.json'
+    $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
+    $text = (Get-Content -LiteralPath (Join-Path (Split-Path $CasesPath) 'rulebook.json') -Raw -Encoding utf8) -replace "`r`n", "`n"
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($text))).ToLowerInvariant()
+    if ($hash -ne $lock.sha256 -and $book.version -le $lock.version) { 'the rule book changed but its version didn''t: raise "version" in rulebook.json' }
+    elseif ($hash -ne $lock.sha256 -or $book.version -ne $lock.version) { 'then update version and sha256 in rulebook.lock.json to ' + $book.version + ' and ' + $hash }
+}
+
 if ($script:failures.Count) {
     Write-Host "$($script:failures.Count) failed, $script:passed passed" -ForegroundColor Red
     $script:failures | ForEach-Object { Write-Host "  FAIL $_" }

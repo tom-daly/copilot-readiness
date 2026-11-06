@@ -159,14 +159,18 @@ function Add-CrRemediationTab {
     }
     $search = [System.Windows.Forms.TextBox]@{ Dock = 'Fill'; PlaceholderText = 'Type to find one by name or address'; Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 4) }
     $list = [System.Windows.Forms.CheckedListBox]@{ Dock = 'Fill'; CheckOnClick = $true; IntegralHeight = $false; Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 4) }
-    $listFoot = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; Dock = 'Fill'; WrapContents = $false; Margin = [System.Windows.Forms.Padding]::new(0) }
+    $listFoot = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; Dock = 'Fill'; WrapContents = $true; Margin = [System.Windows.Forms.Padding]::new(0) }
     $tickShown = [System.Windows.Forms.LinkLabel]@{ Text = 'Check all shown'; AutoSize = $true; Margin = [System.Windows.Forms.Padding]::new(0, 2, 12, 0) }
     $clearAll = [System.Windows.Forms.LinkLabel]@{ Text = 'Clear'; AutoSize = $true; Margin = [System.Windows.Forms.Padding]::new(0, 2, 24, 0) }
     $chosenCount = [System.Windows.Forms.Label]@{ Text = ''; AutoSize = $true; Font = $Bold; Margin = [System.Windows.Forms.Padding]::new(0, 2, 0, 0) }
     $listFoot.Controls.AddRange(@($tickShown, $clearAll, $chosenCount))
-    # Said when more sites match than the list shows.
-    $moreSites = [System.Windows.Forms.Label]@{ AutoSize = $true; ForeColor = $Muted; Visible = $false; Margin = [System.Windows.Forms.Padding]::new(16, 2, 0, 0) }
+    # Said when more sites match than the list shows, on a line of its own so neither it nor the count is cut off.
+    $moreSites = & $NewLabel '' $Font $Muted
+    $moreSites.Tag = 'half'
+    $moreSites.Visible = $false
+    $moreSites.Margin = [System.Windows.Forms.Padding]::new(0, 2, 0, 0)
     $listFoot.Controls.Add($moreSites)
+    $listFoot.SetFlowBreak($chosenCount, $true)
     # What the next preview will do on the chosen sites: only what changed on sites checked before, or read everything.
     $planNote = & $NewLabel '' $Font $Muted
     $planNote.Tag = 'half'
@@ -229,7 +233,9 @@ function Add-CrRemediationTab {
         Rows = @(); Unticked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase); ShowingPreview = $false; Process = $null
         SortColumn = -1; SortDescending = $false
         # Goes up whenever the chosen sites, or their "last checked" times, change (see $chosenInfo).
-        ChosenVersion = 0 }
+        ChosenVersion = 0
+        # How many chosen sites the list leaves out. A tick is always on a site in the list, so it can't change this.
+        NotShown = 0 }
 
     # Each site by address, and when each was last previewed. Worked out once (and again after each
     # preview), not on every keystroke or tick: a tenant can have thousands of OneDrives.
@@ -285,6 +291,7 @@ function Add-CrRemediationTab {
         $moreSites.Visible = $matching.Count -gt $shown.Count
         $moreSites.Text = ('Showing {0:N0} of {1:N0}: type to find the others. Check all ticks all {1:N0}.' -f $shown.Count, $matching.Count)
         $tickShown.Text = if ($matching.Count -gt $shown.Count) { 'Check all {0:N0}' -f $matching.Count } else { 'Check all shown' }
+        $st.NotShown = Get-CrChosenNotShown -Chosen @($chosen) -Shown @($shown) -Known $siteByUrl
         $st.Filling = $false
     }.GetNewClosure()
 
@@ -327,6 +334,8 @@ function Add-CrRemediationTab {
         $info = & $chosenInfo
         $n = $info.Picked.Count
         $chosenCount.Text = if ($n -eq 1) { '1 chosen' } else { '{0:N0} chosen' -f $n }
+        # Ticked sites can be out of the list and are still previewed, so say so. Worked out as the list fills.
+        if ($st.NotShown) { $chosenCount.Text += ', {0:N0} not shown in the list' -f $st.NotShown }
         # Whether the next preview reads everything or only what changed, so it's clear before pressing it.
         $before = $info.Before
         $planNote.Text = if (-not $n) { '' }
@@ -669,10 +678,34 @@ function Add-CrRemediationTab {
     $openSheet.Add_Click({ if ($st.Sheet -and (Test-Path -LiteralPath $st.Sheet)) { Start-Process $st.Sheet } }.GetNewClosure())
     $openFolder.Add_Click({ if ($st.Folder) { Start-Process explorer.exe -ArgumentList "`"$($st.Folder)`"" } }.GetNewClosure())
 
-    foreach ($b in $placeBoxes.Values) { $b.Add_CheckedChanged({ & $fill }.GetNewClosure()) }
+    # A hidden site that's still ticked would be previewed without anyone seeing it, so a kind of
+    # site can't be hidden while any of its sites are ticked.
+    foreach ($b in $placeBoxes.Values) {
+        $b.Add_CheckedChanged({
+                param($sender)
+                if ($st.PuttingBoxBack) { return }
+                if (-not $sender.Checked) {
+                    $kind = "$($sender.Tag)"
+                    $ticked = Get-CrTickedInPlace -Chosen @($chosen) -PlaceOf $placeOf -Place $kind
+                    if ($ticked) {
+                        $st.PuttingBoxBack = $true
+                        try { $sender.Checked = $true } finally { $st.PuttingBoxBack = $false }
+                        $word = $placeWords[$kind]
+                        $sites = if ($ticked -eq 1) { '1 site is' } else { '{0:N0} sites are' -f $ticked }
+                        $them = if ($ticked -eq 1) { 'it' } else { 'them' }
+                        [void][System.Windows.Forms.MessageBox]::Show($form,
+                            "$sites still ticked under $word, so $word can't be hidden. A hidden site would still be included in the preview.`n`nUntick $them first, or press Clear to untick everything.",
+                            'Sites still ticked', 'OK', 'Warning')
+                        return
+                    }
+                }
+                & $fill
+                & $update
+            }.GetNewClosure())
+    }
     # The list is filled again once typing pauses, not on every key: with thousands of sites each fill takes a moment.
     $searchPause = [System.Windows.Forms.Timer]@{ Interval = 300 }
-    $searchPause.Add_Tick({ $searchPause.Stop(); & $fill }.GetNewClosure())
+    $searchPause.Add_Tick({ $searchPause.Stop(); & $fill; & $update }.GetNewClosure())
     $search.Add_TextChanged({ $searchPause.Stop(); $searchPause.Start() }.GetNewClosure())
     $form.Add_FormClosed({ $searchPause.Stop(); $searchPause.Dispose() }.GetNewClosure())
     $siteTick.Handler = [System.Windows.Forms.ItemCheckEventHandler]{

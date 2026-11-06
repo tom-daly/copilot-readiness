@@ -94,7 +94,8 @@ function Get-CrProgressView {
     $progressThisRun = $progress - $doneAtStart
     $estimable = $runFor -ge 20 -and $progressThisRun -gt 0 -and ($done - $doneAtStart -ge 3 -or $total - $doneAtStart -le 3)
     $timeLeft = if ($estimable) { "about $(Format-CrDuration (($total - $progress) * $runFor / $progressThisRun)) left" } else { 'working out how long it will take' }
-    $saved = 'Everything done so far is saved; Continue picks up from there.'
+    $otherRules = Get-CrScanRulesProblem $scope
+    $saved = if ($otherRules) { $otherRules.Message } else { 'Everything done so far is saved; Continue picks up from there.' }
     $pausedFor = if ($p -and $p.pausedUntil) { ([DateTimeOffset]::Parse($p.pausedUntil, [Globalization.CultureInfo]::InvariantCulture) - $Now).TotalSeconds } else { 0 }
 
     $heading, $status = switch ($state) {
@@ -103,10 +104,10 @@ function Get-CrProgressView {
             if ($pausedFor -ge 1) { 'Scanning', "$count. Microsoft asked the scan to slow down, so it is waiting; it starts again in $(Format-CrDuration $pausedFor)." }
             else { 'Scanning', "$count, $timeLeft" }
         }
-        'Stopping' { 'Stopping', "$count. Stopping now; a site cut off partway picks up from its last saved place when you continue." }
+        'Stopping' { 'Stopping', $(if ($otherRules) { "$count. Stopping now." } else { "$count. Stopping now; a site cut off partway picks up from its last saved place when you continue." }) }
         'Completed' { $(if ($null -ne $p.score -or $null -ne $p.oneDriveScore) { "Finished: " + (@($(if ($null -ne $p.score) { "score $($p.score)" }), $(if ($null -ne $p.oneDriveScore) { "OneDrive score $($p.oneDriveScore)" })) -join ', ') + ' out of 100' } else { 'Finished' }), $(if ($total -eq 1) { 'Done.' } else { 'All {0:N0} done.' -f $total }) }
         'Cancelled' { 'Stopped', "Stopped after $count. $saved" }
-        'Failed' { 'The scan stopped', "Stopped after $count because of a problem: $($p.error) $saved" }
+        'Failed' { 'The scan stopped', $(if ($otherRules -and "$($p.error)" -eq $otherRules.Message) { "Stopped after $count. $saved" } else { "Stopped after $count because of a problem: $($p.error) $saved" }) }
         default { 'The scan stopped unexpectedly', "Stopped after $count. $saved If it happens again, scan-errors.log in the results folder may say why." }
     }
 
@@ -137,7 +138,7 @@ function Get-CrProgressView {
         Findings   = $found
         Report     = $report
         CanStop    = $state -in 'Starting', 'Running'
-        CanCarryOn = $state -in 'Cancelled', 'Failed', 'Lost'
+        CanCarryOn = -not $otherRules -and $state -in 'Cancelled', 'Failed', 'Lost'
         Running    = $running
         Pace       = $pace.Id
         PaceAsked  = $paceAsked

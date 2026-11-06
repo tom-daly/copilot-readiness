@@ -171,6 +171,18 @@ try {
     Check 'full address and place' ($byId['l-org-old'].url -eq "$sp/sites/finance/Shared Documents/budget.xlsx" -and $byId['l-org-old'].place -eq 'Team' -and $byId['l-od-old'].place -eq 'OneDrive')
     Check 'the locked site is reported, not fatal' (@($preview.problems).Count -eq 1 -and $preview.problems[0].site -eq $locked)
 
+    # ── A kind of site can't be hidden while its sites are ticked ──
+    $kinds = @{ 'https://a' = 'Team'; 'https://b' = 'Team'; 'https://c' = 'Channel' }
+    Check 'ticked sites of a kind are counted' ((Get-CrTickedInPlace -Chosen 'https://a', 'https://b', 'https://c' -PlaceOf $kinds -Place 'Team') -eq 2)
+    Check 'none ticked of that kind: it can be hidden' ((Get-CrTickedInPlace -Chosen 'https://c' -PlaceOf $kinds -Place 'Team') -eq 0)
+    Check 'nothing ticked at all' ((Get-CrTickedInPlace -Chosen @() -PlaceOf $kinds -Place 'Team') -eq 0)
+
+    # ── Ticked sites the list leaves out ──
+    Check 'a ticked site left out of the list is counted, past the limit too' ((Get-CrChosenNotShown -Chosen 'https://a', 'https://b', 'https://c' -Shown 'https://a' -Known $kinds) -eq 2)
+    Check 'all in the list: none' ((Get-CrChosenNotShown -Chosen 'https://a' -Shown 'https://A', 'https://b' -Known $kinds) -eq 0)
+    Check 'a site no longer in the tenant is not counted: it will not be previewed' ((Get-CrChosenNotShown -Chosen 'https://deleted' -Shown 'https://a' -Known $kinds) -eq 0)
+    Check 'nothing ticked or listed' ((Get-CrChosenNotShown -Chosen @() -Shown @() -Known $kinds) -eq 0)
+
     # ── Progress while one big site is read ──
     Check 'the counts for the site being read are cleared when it finishes' ([int]$p.itemsRead -eq 0 -and [int]$p.itemsTotal -eq 0 -and [int]$p.siteLinks -eq 0)
     $live = @{}

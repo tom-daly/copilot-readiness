@@ -51,6 +51,10 @@ The top right of the main window shows which tenant you're signed in to. **Sign 
 
 From PowerShell, `./Start.ps1 -Tenant fabrikam` switches straight to that tenant.
 
+## A newer version
+
+You only set up once on each computer. A newer version uses the same app and certificate. [Getting a newer version](install.md#getting-a-newer-version) has the steps.
+
 ## Another PC
 
 Your tenant only needs one app, and each computer gets its own certificate for it. When you set up a second computer, the window tells you the app is already registered but this computer has no certificate yet, so it creates one and adds it. To scan from a second computer:

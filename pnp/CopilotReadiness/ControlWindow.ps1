@@ -48,7 +48,8 @@ function New-CrControlForm {
       Get-CrAbout) fills the Settings tab. TenantSettings (from Get-CrTenantSettingsView, or the
       reason they couldn't be read) fills the Tenant tab; TenantSettingsRead says when they were
       read (ReadAt) and why a refresh failed (Problem). Remediation (see Add-CrRemediationTab)
-      adds the Remediation tab. StartTab names the tab to open on.
+      adds the Remediation tab. StartTab names the tab to open on, and StartGroup the group on the
+      Tenant tab, which RefreshTenant hands back as Group.
       Two more actions close it: 'RefreshTenant' (read the tenant's settings again, then open on
       the Tenant tab) and 'Uninstall' (remove the app from the tenant and this PC, already confirmed).
     #>
@@ -66,7 +67,8 @@ function New-CrControlForm {
         $TenantSettings,
         $TenantSettingsRead,
         [hashtable] $Remediation,
-        [string] $StartTab
+        [string] $StartTab,
+        [string] $StartGroup
     )
     $spCount = @($Sites | Where-Object kind -NE 'OneDrive').Count
     $odCount = @($Sites | Where-Object kind -EQ 'OneDrive').Count
@@ -109,12 +111,15 @@ function New-CrControlForm {
     }
     # Labels that wrap; they are widened with the window.
     $wrapped = [System.Collections.Generic.List[System.Windows.Forms.Label]]::new()
-    function New-Label([string] $text, $labelFont = $font, $color = $null) {
-        $l = [System.Windows.Forms.Label]@{ Text = $text; Font = $labelFont; AutoSize = $true; MaximumSize = [System.Drawing.Size]::new(640, 0); Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 4) }
+    # As a closure too, for what's made after the window is built.
+    $makeLabel = {
+        param([string] $text, $labelFont, $color, [int] $width = 640)
+        $l = [System.Windows.Forms.Label]@{ Text = $text; Font = $labelFont; AutoSize = $true; MaximumSize = [System.Drawing.Size]::new($width, 0); Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 4) }
         if ($color) { $l.ForeColor = $color }
         $wrapped.Add($l)
         $l
-    }
+    }.GetNewClosure()
+    function New-Label([string] $text, $labelFont = $font, $color = $null) { & $makeLabel $text $labelFont $color }
 
     # Title on the left; on the right, which tenant this is and a button to sign out of it.
     $header = [System.Windows.Forms.TableLayoutPanel]@{ AutoSize = $true; Dock = 'Fill'; ColumnCount = 2; RowCount = 1; Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 4) }
@@ -175,13 +180,16 @@ function New-CrControlForm {
     $pastPage, $pastLayout = New-Page "Past scans ($(@($PastScans).Count))"
     $tabs.TabPages.AddRange(@($newPage, $pastPage))
     $tenantPage = $null
-    # The Tenant tab's cards. Each is measured once and then keeps its size, because measuring all of
-    # them every time the tab is shown took ten seconds or more; they are measured again when the width changes.
-    $tenantCards = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+    # The Tenant tab's settings are on tabs of their own, by group, so only the group on screen is measured.
+    # Each card is measured once and then keeps its size, because measuring all of them every time the tab
+    # was shown took ten seconds or more; they are measured again when the width changes. By group's page:
+    # Layout, the group's cards, and the code boxes in them.
+    $tenantTabs = if ($TenantSettings -and $TenantSettings -isnot [string]) { [System.Windows.Forms.TabControl]@{ Dock = 'Fill'; Padding = [System.Drawing.Point]::new(12, 5); Margin = [System.Windows.Forms.Padding]::new(0, 8, 0, 0) } }
+    $tenantGroups = [System.Collections.Generic.Dictionary[object, object]]::new()
+    $tenantWidth = @{ Rest = 640 }
     if ($TenantSettings) {
-        # This tab can be long, so its content keeps its own height and the page scrolls.
         $tenantPage, $tenantLayout = New-Page 'Tenant'
-        $tenantLayout.Dock = 'Top'; $tenantLayout.AutoSize = $true
+        $tenantPage.AutoScroll = $false
         $tabs.TabPages.Add($tenantPage)
     }
     if ($Remediation) {
@@ -316,6 +324,7 @@ function New-CrControlForm {
 
     # Past scans of this tenant, newest first: open a finished one's report, continue one that stopped, or remove old ones.
     $pastNote = New-Label $(if (@($PastScans).Count) { 'Scans of this tenant run on this PC, newest first. Double-click a finished one to open its report. Hold Ctrl or Shift to pick several to remove.' } else { 'No scans of this tenant on this PC yet.' }) $font $muted
+    $pastHint = $pastNote.Text
     $null = Add-Row $pastNote -to $pastLayout
     $pastList = [System.Windows.Forms.ListView]@{ View = 'Details'; FullRowSelect = $true; MultiSelect = $true; HideSelection = $false; Dock = 'Fill'; Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 4) }
     foreach ($c in @(@('Started', 175), @('What', 230), @('Sites', 90), @('How it ended', 170), @('Score', 60), @('OneDrive score', 115), @('High', 55), @('Medium', 65), @('Low', 50))) {
@@ -330,6 +339,8 @@ function New-CrControlForm {
         $ended = switch ($p.State) {
             'Completed' { 'Finished' }
             'Running' { 'Running now' }
+            'OlderRules' { 'Stopped, older rules' }
+            'NewerRules' { 'Stopped, newer rules' }
             default { 'Stopped, can continue' }
         }
         $row = [System.Windows.Forms.ListViewItem]::new($p.StartedAt.ToLocalTime().ToString('MMM d, yyyy, h:mm tt'))
@@ -362,6 +373,8 @@ function New-CrControlForm {
             $p = & $picked
             $openReport.Enabled = [bool]($p -and $p.Report)
             $carryOn.Enabled = [bool]($p -and $p.State -in 'Stopped', 'Running')
+            # A scan that can't be continued says why, and what to do instead.
+            $pastNote.Text = if ($p -and $p.RulesNote) { $p.RulesNote } else { $pastHint }
             $carryOn.Text = if ($p -and $p.State -eq 'Running') { 'Show progress' } else { 'Continue scan' }
             $openFolder.Enabled = [bool]$p
             $removeScans.Enabled = @(& $removable).Count -gt 0
@@ -405,7 +418,7 @@ function New-CrControlForm {
         $readText = [System.Windows.Forms.Label]@{ Text = $(if ($readAt) { "Read from your tenant on $readAt." } else { 'Not read from your tenant yet.' }); AutoSize = $true; ForeColor = $muted; Margin = [System.Windows.Forms.Padding]::new(0, 7, 12, 0) }
         $refreshTenant = [System.Windows.Forms.Button]@{ Text = 'Refresh'; AutoSize = $true; Padding = [System.Windows.Forms.Padding]::new(8, 1, 8, 1) }
         Set-CrButtonStyle $refreshTenant
-        $refreshTenant.Add_Click({ $form.Tag = [pscustomobject]@{ Action = 'RefreshTenant'; Level = $null; Include = $null; Sites = @(); Folder = $null }; $form.Close() }.GetNewClosure())
+        $refreshTenant.Add_Click({ $form.Tag = [pscustomobject]@{ Action = 'RefreshTenant'; Level = $null; Include = $null; Sites = @(); Folder = $null; Group = $(if ($tenantTabs) { "$($tenantTabs.SelectedTab.Tag)" }) }; $form.Close() }.GetNewClosure())
         $tips.SetToolTip($refreshTenant, 'Read the settings from your tenant again. The window closes and opens again on this tab.')
         $readRow.Controls.AddRange(@($readText, $refreshTenant))
         $null = Add-Row $readRow -to $tenantLayout
@@ -421,6 +434,18 @@ function New-CrControlForm {
         $cardValue = [System.Drawing.Font]::new('Segoe UI Semibold', 11.5)
         $cardAdvice = [System.Drawing.Font]::new('Segoe UI', 10.5)
         $badgeFont = [System.Drawing.Font]::new('Segoe UI Semibold', 10.5)
+        $codeFont = [System.Drawing.Font]::new('Consolas', 10)
+        $codeBack = [System.Drawing.Color]::FromArgb(18, 18, 18)
+        $codeColors = @{
+            Comment  = [System.Drawing.Color]::FromArgb(106, 153, 85)
+            Command  = [System.Drawing.Color]::FromArgb(220, 220, 170)
+            Option   = [System.Drawing.Color]::FromArgb(156, 220, 254)
+            Value    = [System.Drawing.Color]::FromArgb(206, 145, 120)
+            Variable = [System.Drawing.Color]::FromArgb(86, 156, 214)
+        }
+        # PnP or SPO, one at a time. The choice holds for every card and while this run lasts, so it's only made once.
+        $toolChoice = @{ Tool = Get-CrCommandTool }
+        $toolCards = [System.Collections.Generic.List[scriptblock]]::new()
         $ink = [System.Drawing.Color]::FromArgb(32, 36, 42)
         $looks = @{
             Watch = @{ Word = 'Change this'; Badge = [System.Drawing.Color]::FromArgb(191, 87, 0); Back = [System.Drawing.Color]::FromArgb(255, 244, 229); Edge = [System.Drawing.Color]::FromArgb(255, 204, 128) }
@@ -428,13 +453,15 @@ function New-CrControlForm {
             Info  = @{ Word = 'Just so you know'; Badge = [System.Drawing.Color]::FromArgb(90, 100, 112); Back = [System.Drawing.Color]::FromArgb(243, 245, 248); Edge = [System.Drawing.Color]::FromArgb(205, 210, 218) }
         }
         $glyphs = @{}
-        function Get-Glyph([char] $glyph, [System.Drawing.Color] $color) {
+        $glyphOf = {
+            param([char] $glyph, [System.Drawing.Color] $color)
             # Drawn once per icon and shared; every card has the same few buttons.
             $key = "$([int]$glyph)-$($color.ToArgb())"
             if (-not $glyphs.ContainsKey($key)) { $glyphs[$key] = New-CrGlyph $glyph 18 $color }
             $glyphs[$key]
-        }
-        function New-IconButton([string] $text, [char] $glyph) {
+        }.GetNewClosure()
+        $iconButton = {
+            param([string] $text, [char] $glyph)
             $b = [System.Windows.Forms.Button]@{
                 Text = $text; Font = $cardAdvice; AutoSize = $true; FlatStyle = 'Flat'; TextImageRelation = 'ImageBeforeText'; ImageAlign = 'MiddleLeft'
                 Cursor = [System.Windows.Forms.Cursors]::Hand; BackColor = [System.Drawing.Color]::White; ForeColor = $ink
@@ -442,9 +469,16 @@ function New-CrControlForm {
             }
             $b.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(200, 205, 212)
             $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(240, 243, 246)
-            $b.Image = Get-Glyph $glyph $ink
+            $b.Image = & $glyphOf $glyph $ink
             $b
-        }
+        }.GetNewClosure()
+        # A wrapping label for inside a card, at the width the cards are now.
+        $restLabel = {
+            param([string] $text, $color)
+            $l = & $makeLabel $text $cardAdvice $color $tenantWidth.Rest
+            $l.Tag = 'rest'
+            $l
+        }.GetNewClosure()
 
         # The headline: how many settings should change, in one plain sentence.
         $all = @($TenantSettings | ForEach-Object Rows)
@@ -461,14 +495,206 @@ function New-CrControlForm {
                 'Press Show more on a card for why, where to find the setting and a picture of the screen.') $cardAdvice $muted) -to $tenantLayout
 
         $thumbs = @{}
-        $chevronDown = Get-Glyph ([char]0xE70D) $ink
-        $chevronUp = Get-Glyph ([char]0xE70E) $ink
+        # The window is built again after Refresh and after a scan, so what it draws with goes when it does.
+        $form.Add_Disposed({
+                foreach ($made in @($cardName, $cardValue, $cardAdvice, $badgeFont, $codeFont) + @($glyphs.Values) + @($thumbs.Values) | Where-Object { $_ }) { $made.Dispose() }
+            }.GetNewClosure())
+        $chevronDown = & $glyphOf ([char]0xE70D) $ink
+        $chevronUp = & $glyphOf ([char]0xE70E) $ink
+        # The screen a card shows, scaled once when it's first opened and shared by every card that shows it:
+        # painting a full-size image each time is slow, and most cards are never opened.
+        $thumbOf = {
+            param($file)
+            if (-not $thumbs.ContainsKey($file)) {
+                $full = [System.Drawing.Image]::FromFile($file)
+                $thumb = [System.Drawing.Bitmap]::new(360, [int](360 * $full.Height / $full.Width))
+                $g = [System.Drawing.Graphics]::FromImage($thumb)
+                $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $g.DrawImage($full, 0, 0, $thumb.Width, $thumb.Height)
+                $g.Dispose(); $full.Dispose()
+                $thumbs[$file] = $thumb
+            }
+            $thumbs[$file]
+        }.GetNewClosure()
+        # Lets a card grow or shrink to fit a change, then keeps its new size. If the change fails, the group still carries on.
+        $refitCard = {
+            param($card, $groupLayout, [scriptblock] $change, $with)
+            $groupLayout.SuspendLayout()
+            try { $card.AutoSize = $true; & $change $with }
+            finally {
+                $groupLayout.ResumeLayout($true)
+                $size = $card.Size
+                $card.AutoSize = $false
+                $card.Size = $size
+            }
+        }.GetNewClosure()
+        # What a card shows behind Show more, made the first time it's pressed: most cards are never opened, and
+        # making and measuring all of it for every card is what made this tab slow. This runs long after the
+        # window was built, so what the buttons it adds need comes in ui, which they keep hold of.
+        $fillCard = {
+            param($ui, $r, $details, $card, $groupLayout, $groupEntry)
+            if ($r.Advice) {
+                $advice = & $restLabel $r.Advice $ink
+                $advice.Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 0)
+                $details.Controls.Add($advice)
+            }
+            if ($r.Where) {
+                $where = & $restLabel "Where to find it: $($r.Where)" $muted
+                $where.Margin = [System.Windows.Forms.Padding]::new(0, 8, 0, 0)
+                $details.Controls.Add($where)
+            }
+            # A picture that can't be read is left out; the rest of the card still shows.
+            $image = if ($r.Picture -and (Test-Path -LiteralPath $r.Picture)) { try { & $thumbOf $r.Picture } catch { $null } }
+            if ($image) {
+                $picture = [System.Windows.Forms.PictureBox]@{ Image = $image; Size = $image.Size; SizeMode = 'Normal'; BackColor = [System.Drawing.Color]::White; BorderStyle = 'FixedSingle'; Cursor = [System.Windows.Forms.Cursors]::Hand; Margin = [System.Windows.Forms.Padding]::new(0, 8, 0, 0) }
+                $pictureFile = $r.Picture
+                $picture.Add_Click({ Start-Process $pictureFile }.GetNewClosure())
+                $details.Controls.Add($picture)
+            }
+            $buttons = @()
+            if ($image) { $buttons += [pscustomobject]@{ Text = 'Show me'; Url = $r.Picture; Icon = [char]0xE91B } }
+            $buttons += @($r.Links)
+            $commands = @($r.Commands)
+            if ($buttons.Count -or $commands.Count) {
+                $buttonRow = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; FlowDirection = 'LeftToRight'; WrapContents = $true; Margin = [System.Windows.Forms.Padding]::new(0, 10, 0, 0) }
+                foreach ($l in $buttons) {
+                    $url = $l.Url
+                    $button = & $iconButton $l.Text $l.Icon
+                    $button.Add_Click({ Start-Process $url }.GetNewClosure())
+                    $buttonRow.Controls.Add($button)
+                }
+                $details.Controls.Add($buttonRow)
+            }
+            if ($commands.Count) {
+                # The commands to change the setting, folded away behind their own button: PnP or SPO, one at a time.
+                $powerShell = & $iconButton 'PowerShell' ([char]0xE70D)
+                $powerShell.TextImageRelation = 'TextBeforeImage'
+                $buttonRow.Controls.Add($powerShell)
+
+                $codePanel = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; FlowDirection = 'TopDown'; WrapContents = $false; Visible = $false; Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 0) }
+                $toolRow = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; WrapContents = $false; Margin = [System.Windows.Forms.Padding]::new(0) }
+                $radios = @{}
+                foreach ($name in 'PnP', 'SPO') {
+                    $radios[$name] = [System.Windows.Forms.RadioButton]@{ Text = $name; Font = $cardAdvice; AutoSize = $true; Checked = $name -eq $ui.ToolChoice.Tool; Margin = [System.Windows.Forms.Padding]::new(0, 0, 18, 0) }
+                    $toolRow.Controls.Add($radios[$name])
+                }
+                $codePanel.Controls.Add($toolRow)
+                $caption = & $restLabel ' ' $muted
+                $caption.Margin = [System.Windows.Forms.Padding]::new(0, 6, 0, 0)
+                $codePanel.Controls.Add($caption)
+                $lineCount = (@($commands | ForEach-Object { @($_.Text -split "`r`n").Count }) | Measure-Object -Maximum).Maximum
+                $codeFrame = [System.Windows.Forms.Panel]@{
+                    BackColor = $codeBack; Width = $tenantWidth.Rest; Padding = [System.Windows.Forms.Padding]::new(12, 10, 12, 4); Margin = [System.Windows.Forms.Padding]::new(0, 6, 0, 6)
+                    Height = $lineCount * $codeFont.Height + 22 + [System.Windows.Forms.SystemInformation]::HorizontalScrollBarHeight
+                }
+                $codeView = [System.Windows.Forms.RichTextBox]@{ Dock = 'Fill'; ReadOnly = $true; BorderStyle = 'None'; BackColor = $codeBack; ForeColor = [System.Drawing.Color]::FromArgb(212, 212, 212); Font = $codeFont; WordWrap = $false; ScrollBars = 'Horizontal'; DetectUrls = $false; TabStop = $false }
+                $codeFrame.Controls.Add($codeView)
+                $groupEntry.Codes.Add($codeFrame)
+                $codePanel.Controls.Add($codeFrame)
+                $actions = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; WrapContents = $false; Margin = [System.Windows.Forms.Padding]::new(0) }
+                $copy = & $iconButton 'Copy' ([char]0xE8C8)
+                $actions.Controls.Add($copy)
+                $helpLink = @($commands | ForEach-Object Help | Where-Object { $_ }) | Select-Object -First 1
+                $help = $null
+                if ($helpLink) {
+                    $helpUrl = $helpLink.Url
+                    $help = & $iconButton $helpLink.Text $helpLink.Icon
+                    $help.Add_Click({ Start-Process $helpUrl }.GetNewClosure())
+                    $actions.Controls.Add($help)
+                }
+                $codePanel.Controls.Add($actions)
+                $details.Controls.Add($codePanel)
+
+                $codeState = @{ Open = $false; Showing = $null; Text = '' }
+                # Says what happened for a moment, then goes back, so it can't be read later as being about something else.
+                $copyPause = [System.Windows.Forms.Timer]@{ Interval = 2500 }
+                $copyPause.Add_Tick({ $copyPause.Stop(); if (-not $copy.IsDisposed) { $copy.Text = 'Copy' } }.GetNewClosure())
+                $copy.Add_Disposed({ $copyPause.Stop(); $copyPause.Dispose() }.GetNewClosure())
+                $copy.Add_Click({
+                        try { [System.Windows.Forms.Clipboard]::SetText($codeState.Text); $copy.Text = 'Copied' } catch { $copy.Text = 'Couldn''t copy' }
+                        $copyPause.Stop(); $copyPause.Start()
+                    }.GetNewClosure())
+                # Filled in only once it's opened, so opening the window stays quick.
+                $showCode = {
+                    if ($codeState.Showing -eq $ui.ToolChoice.Tool) { return }
+                    $use = @($commands | Where-Object Tool -EQ $ui.ToolChoice.Tool)[0]
+                    $codeState.Showing = $use.Tool
+                    $codeState.Text = $use.Text
+                    $caption.Text = $use.Caption
+                    $copy.Text = 'Copy'
+                    if ($help) { $help.Visible = [bool]$use.Help }
+                    Set-CrCodeView -View $codeView -Text $use.Text -Colors $ui.CodeColors
+                }.GetNewClosure()
+                $togglePowerShell = {
+                    $codeState.Open = -not $codeState.Open
+                    $codePanel.Visible = $codeState.Open
+                    if ($codeState.Open) { & $showCode }
+                    $powerShell.Image = if ($codeState.Open) { $ui.ChevronUp } else { $ui.ChevronDown }
+                }.GetNewClosure()
+                $powerShell.Add_Click({ & $ui.RefitCard $card $groupLayout $togglePowerShell }.GetNewClosure())
+                # When the choice changes on any card, this one follows it.
+                $ui.ToolCards.Add({
+                        $radios[$ui.ToolChoice.Tool].Checked = $true
+                        if ($codeState.Open) { & $ui.RefitCard $card $groupLayout $showCode }
+                    }.GetNewClosure())
+                foreach ($name in 'PnP', 'SPO') {
+                    $radio = $radios[$name]
+                    $radio.Add_CheckedChanged({
+                            if (-not $radio.Checked -or $ui.ToolChoice.Tool -eq $name) { return }
+                            $ui.ToolChoice.Tool = $name
+                            Set-CrCommandTool $name
+                            foreach ($follow in $ui.ToolCards) { & $follow }
+                        }.GetNewClosure())
+                }
+            }
+        }.GetNewClosure()
+        $ui = @{ ToolChoice = $toolChoice; ToolCards = $toolCards; CodeColors = $codeColors; ChevronUp = $chevronUp; ChevronDown = $chevronDown; RefitCard = $refitCard }
+        # One Show more for every card, and one border: each card made its own, and a window's worth of them made it slow to open.
+        $toggleMore = {
+            param($c)
+            # Made here the first time. If that fails, it says why, takes back what it added, and tries again next time.
+            if (-not $c.Details.Visible -and -not $c.Filled) {
+                if ($c.Problem) { [void]$wrapped.Remove($c.Problem); $c.Problem.Dispose(); $c.Problem = $null }
+                $labels = $wrapped.Count; $codes = $c.GroupEntry.Codes.Count; $followers = $toolCards.Count
+                try { & $fillCard $ui $c.Row $c.Details $c.Card $c.GroupLayout $c.GroupEntry; $c.Filled = $true }
+                catch {
+                    $why = $_.Exception.Message
+                    foreach ($made in @($c.Details.Controls)) { $made.Dispose() }
+                    $wrapped.RemoveRange($labels, $wrapped.Count - $labels)
+                    $c.GroupEntry.Codes.RemoveRange($codes, $c.GroupEntry.Codes.Count - $codes)
+                    $toolCards.RemoveRange($followers, $toolCards.Count - $followers)
+                    $c.Problem = & $restLabel "Couldn't show this just now: $why Press Show less, then Show more to try again." $muted
+                    $c.Details.Controls.Add($c.Problem)
+                }
+            }
+            $c.Details.Visible = -not $c.Details.Visible
+            $c.More.Text = if ($c.Details.Visible) { 'Show less' } else { 'Show more' }
+            $c.More.Image = if ($c.Details.Visible) { $chevronUp } else { $chevronDown }
+        }.GetNewClosure()
+        $onMore = { param($sender) & $refitCard $sender.Tag.Card $sender.Tag.GroupLayout $toggleMore $sender.Tag }.GetNewClosure()
+        $paintEdge = {
+            param($sender, $e)
+            $pen = [System.Drawing.Pen]::new($sender.Tag, 1)
+            $e.Graphics.DrawRectangle($pen, 0, 0, $sender.Width - 1, $sender.Height - 1)
+            $pen.Dispose()
+        }
         $tenantLayout.SuspendLayout()
+        $null = Add-Row $tenantTabs 'Fill' -to $tenantLayout
+        $openOn = $null
+        $backOn = $null
         foreach ($group in $TenantSettings) {
             if (-not @($group.Rows).Count) { continue }
-            $heading = New-Label $group.Name $title $ink
-            $heading.Margin = [System.Windows.Forms.Padding]::new(0, 18, 0, 6)
-            $null = Add-Row $heading -to $tenantLayout
+            # Each group's tab says how many of its settings are worth changing, and scrolls on its own.
+            $groupChange = @($group.Rows | Where-Object State -EQ 'Watch').Count
+            $groupPage, $groupLayout = New-Page $(if ($groupChange) { "$($group.Name): $groupChange to change" } else { $group.Name })
+            $groupPage.Tag = $group.Name
+            $groupLayout.Dock = 'Top'; $groupLayout.AutoSize = $true
+            $groupLayout.SuspendLayout()
+            $tenantTabs.TabPages.Add($groupPage)
+            $groupEntry = @{ Layout = $groupLayout; Cards = [System.Collections.Generic.List[object]]::new(); Codes = [System.Collections.Generic.List[object]]::new() }
+            $tenantGroups[$groupPage] = $groupEntry
+            if ($group.Name -eq $StartGroup) { $backOn = $groupPage }
+            if ($groupChange -and -not $openOn) { $openOn = $groupPage }
             # What needs changing comes first, so it isn't missed.
             $rows = @($group.Rows | Where-Object State -EQ 'Watch') + @($group.Rows | Where-Object State -EQ 'Good') + @($group.Rows | Where-Object State -EQ 'Info')
             foreach ($r in $rows) {
@@ -477,12 +703,8 @@ function New-CrControlForm {
                 $null = $card.ColumnStyles.Add([System.Windows.Forms.ColumnStyle]::new('Absolute', 150))
                 $null = $card.ColumnStyles.Add([System.Windows.Forms.ColumnStyle]::new('Percent', 100))
                 $null = $card.RowStyles.Add([System.Windows.Forms.RowStyle]::new('AutoSize'))
-                $edge = $look.Edge
-                $card.Add_Paint({ param($sender, $e)
-                        $pen = [System.Drawing.Pen]::new($edge, 1)
-                        $e.Graphics.DrawRectangle($pen, 0, 0, $sender.Width - 1, $sender.Height - 1)
-                        $pen.Dispose()
-                    }.GetNewClosure())
+                $card.Tag = $look.Edge
+                $card.Add_Paint($paintEdge)
 
                 $badge = [System.Windows.Forms.Label]@{ Text = $look.Word; Font = $badgeFont; ForeColor = [System.Drawing.Color]::White; BackColor = $look.Badge; AutoSize = $false; Size = [System.Drawing.Size]::new(130, 32); TextAlign = 'MiddleCenter'; Margin = [System.Windows.Forms.Padding]::new(0, 2, 0, 0) }
                 $what = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; FlowDirection = 'TopDown'; WrapContents = $false; Dock = 'Fill'; Margin = [System.Windows.Forms.Padding]::new(0) }
@@ -510,73 +732,23 @@ function New-CrControlForm {
 
                 # The rest is folded away behind Show more, so the list stays short and quick to draw.
                 $details = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; FlowDirection = 'TopDown'; WrapContents = $false; Visible = $false; Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 0) }
-                if ($r.Advice) {
-                    $advice = New-Label $r.Advice $cardAdvice $ink
-                    $advice.Tag = 'rest'
-                    $advice.Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 0)
-                    $details.Controls.Add($advice)
-                }
-                if ($r.Where) {
-                    $where = New-Label "Where to find it: $($r.Where)" $cardAdvice $muted
-                    $where.Tag = 'rest'
-                    $where.Margin = [System.Windows.Forms.Padding]::new(0, 8, 0, 0)
-                    $details.Controls.Add($where)
-                }
-                $hasPicture = $r.Picture -and (Test-Path $r.Picture)
-                if ($hasPicture) {
-                    if (-not $thumbs.ContainsKey($r.Picture)) {
-                        # Scaled once and shared by every card that shows the same screen; painting a full-size image each time is slow.
-                        $full = [System.Drawing.Image]::FromFile($r.Picture)
-                        $thumb = [System.Drawing.Bitmap]::new(360, [int](360 * $full.Height / $full.Width))
-                        $g = [System.Drawing.Graphics]::FromImage($thumb)
-                        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-                        $g.DrawImage($full, 0, 0, $thumb.Width, $thumb.Height)
-                        $g.Dispose(); $full.Dispose()
-                        $thumbs[$r.Picture] = $thumb
-                    }
-                    $image = $thumbs[$r.Picture]
-                    $picture = [System.Windows.Forms.PictureBox]@{ Image = $image; SizeMode = 'Normal'; Size = $image.Size; BackColor = [System.Drawing.Color]::White; BorderStyle = 'FixedSingle'; Cursor = [System.Windows.Forms.Cursors]::Hand; Margin = [System.Windows.Forms.Padding]::new(0, 8, 0, 0) }
-                    $pictureFile = $r.Picture
-                    $picture.Add_Click({ Start-Process $pictureFile }.GetNewClosure())
-                    $details.Controls.Add($picture)
-                }
-                $buttons = @()
-                if ($hasPicture) { $buttons += [pscustomobject]@{ Text = 'Show me'; Url = $r.Picture; Icon = [char]0xE91B } }
-                $buttons += @($r.Links)
-                if ($buttons.Count) {
-                    $buttonRow = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; FlowDirection = 'LeftToRight'; WrapContents = $true; Margin = [System.Windows.Forms.Padding]::new(0, 10, 0, 0) }
-                    foreach ($l in $buttons) {
-                        $url = $l.Url
-                        $button = New-IconButton $l.Text $l.Icon
-                        $button.Add_Click({ Start-Process $url }.GetNewClosure())
-                        $buttonRow.Controls.Add($button)
-                    }
-                    $details.Controls.Add($buttonRow)
-                }
 
-                $more = New-IconButton 'Show more' ([char]0xE70D)
+                $more = & $iconButton 'Show more' ([char]0xE70D)
                 $more.Margin = [System.Windows.Forms.Padding]::new(0, 6, 0, 0)
-                $more.Add_Click({
-                        # The card grows or shrinks to fit, then keeps its new size.
-                        $tenantLayout.SuspendLayout()
-                        $card.AutoSize = $true
-                        $details.Visible = -not $details.Visible
-                        $more.Text = if ($details.Visible) { 'Show less' } else { 'Show more' }
-                        $more.Image = if ($details.Visible) { $chevronUp } else { $chevronDown }
-                        $tenantLayout.ResumeLayout($true)
-                        $size = $card.Size
-                        $card.AutoSize = $false
-                        $card.Size = $size
-                    }.GetNewClosure())
+                $more.Tag = @{ Row = $r; Details = $details; Card = $card; GroupLayout = $groupLayout; GroupEntry = $groupEntry; More = $more; Filled = $false }
+                $more.Add_Click($onMore)
                 $what.Controls.Add($more)
                 $what.Controls.Add($details)
 
                 $card.Controls.Add($badge, 0, 0)
                 $card.Controls.Add($what, 1, 0)
-                $null = Add-Row $card -to $tenantLayout
-                $tenantCards.Add($card)
+                $null = Add-Row $card -to $groupLayout
+                $groupEntry.Cards.Add($card)
             }
+            $groupLayout.ResumeLayout($false)
         }
+        # Always one chosen: a tab control not yet on screen has none, and then nothing would be measured ahead of time.
+        if ($backOn) { $tenantTabs.SelectedTab = $backOn } elseif ($openOn) { $tenantTabs.SelectedTab = $openOn } elseif ($tenantTabs.TabPages.Count) { $tenantTabs.SelectedIndex = 0 }
         $tenantLayout.ResumeLayout()
     }
 
@@ -755,37 +927,46 @@ function New-CrControlForm {
         $widths = @{
             default = [Math]::Max(300, $layout.ClientSize.Width - $layout.Padding.Horizontal - 80)
             half    = [Math]::Max(200, [int]($tabs.ClientSize.Width / 2) - 70)
-            rest    = [Math]::Max(200, $tabs.ClientSize.Width - 240)
+            rest    = [Math]::Max(200, $tabs.ClientSize.Width - 280)
         }
         $widths.narrow = [Math]::Max(200, $widths.rest - 140)
-        # Keyed by the widths the text wraps to, not the window's: the panels inside can settle at a new
+        $tenantWidth.Rest = $widths.rest
+        # Compared by the widths the text wraps to, not the window's: the panels inside can settle at a new
         # width while the window's stays put (as when it first appears), and the text must follow them.
-        $key = "$($page.Text)|$($widths.default)|$($widths.half)|$($widths.rest)"
-        if ($reflowed.ContainsKey($key)) { return }
-        $reflowed[$key] = $true
+        # On the Tenant tab, that's only the group on screen.
+        $groupPage = if ($tenantTabs -and $page -eq $tenantPage) { $tenantTabs.SelectedTab }
+        $group = if ($groupPage) { $tenantGroups[$groupPage] }
+        # Only the last widths each place was measured at count: going back to an earlier width has to measure it again.
+        $place = "$($page.Text)|$($groupPage.Text)"
+        $key = "$($widths.default)|$($widths.half)|$($widths.rest)"
+        if ($reflowed[$place] -eq $key) { return }
+        $reflowed[$place] = $key
         $todo = foreach ($l in $wrapped) {
             if (-not $pageOf.ContainsKey($l)) {
                 $p = $l.Parent
                 while ($p -and $p -isnot [System.Windows.Forms.TabPage]) { $p = $p.Parent }
                 $pageOf[$l] = $p
             }
-            if (-not $pageOf[$l] -or $pageOf[$l] -eq $page) { $l }
+            if (-not $pageOf[$l] -or $pageOf[$l] -eq $page -or ($groupPage -and $pageOf[$l] -eq $groupPage)) { $l }
         }
         $holders = [System.Collections.Generic.HashSet[object]]::new()
         foreach ($l in $todo) { if ($l.Parent) { $null = $holders.Add($l.Parent) } }
-        # The Tenant tab's cards are measured again at the new width, all at once, then keep their size.
-        $isTenant = $tenantPage -and $page -eq $tenantPage
-        if ($isTenant) { $tenantLayout.SuspendLayout(); foreach ($c in $tenantCards) { $c.SuspendLayout(); $c.AutoSize = $true } }
+        # A group's cards are measured again at the new width, all at once, then keep their size.
+        if ($group) { $group.Layout.SuspendLayout(); foreach ($c in $group.Cards) { $c.SuspendLayout(); $c.AutoSize = $true } }
         foreach ($h in $holders) { $h.SuspendLayout() }
         foreach ($l in $todo) {
             $w = switch ($l.Tag) { 'half' { $widths.half } 'rest' { $widths.rest } 'narrow' { $widths.narrow } default { $widths.default } }
             $l.MaximumSize = [System.Drawing.Size]::new($w, 0)
         }
         foreach ($h in $holders) { $h.ResumeLayout($true) }
-        if ($isTenant) {
-            foreach ($c in $tenantCards) { $c.ResumeLayout($false) }
-            $tenantLayout.ResumeLayout($true)
-            foreach ($c in $tenantCards) { $size = $c.Size; $c.AutoSize = $false; $c.Size = $size }
+        if ($group) {
+            foreach ($b in $group.Codes) { $b.Width = $widths.rest }
+            foreach ($c in $group.Cards) { $c.ResumeLayout($false) }
+            $group.Layout.ResumeLayout($true)
+            # All at once: one card at a time makes the whole group lay itself out again for each.
+            $group.Layout.SuspendLayout()
+            foreach ($c in $group.Cards) { $size = $c.Size; $c.AutoSize = $false; $c.Size = $size }
+            $group.Layout.ResumeLayout($true)
         }
         & $fit
     }.GetNewClosure()
@@ -795,12 +976,30 @@ function New-CrControlForm {
         }.GetNewClosure())
     $form.Add_ResizeEnd({ & $reflow }.GetNewClosure())
     $tabs.Add_SelectedIndexChanged({ & $reflow }.GetNewClosure())
+    if ($tenantTabs) { $tenantTabs.Add_SelectedIndexChanged({ & $reflow }.GetNewClosure()) }
     # The panels only settle at their final size once the window is on screen. The Tenant tab is
     # measured then too, whichever tab is showing, so opening it later is quick.
     $form.Add_Shown({ & $reflow; if ($tenantPage -and $tabs.SelectedTab -ne $tenantPage) { & $reflow $tenantPage } }.GetNewClosure())
 
     & $refresh
     $form
+}
+
+# PnP or SPO for the Tenant tab's commands. Kept here because the window is built again after Refresh and after a scan.
+$script:CommandTool = 'PnP'
+function Get-CrCommandTool { $script:CommandTool }
+function Set-CrCommandTool { param([Parameter(Mandatory)] [ValidateSet('PnP', 'SPO')] [string] $Tool) $script:CommandTool = $Tool }
+
+function Set-CrCodeView {
+    <# Shows code in a box, coloured like a code editor. Colors gives each kind from Get-CrCodeSpans its colour. #>
+    param([Parameter(Mandatory)] [System.Windows.Forms.RichTextBox] $View, [Parameter(Mandatory)] [string] $Text, [Parameter(Mandatory)] [hashtable] $Colors)
+    $View.Text = $Text
+    # Measured on the box's own copy: it keeps line ends differently, which moves everything after the first line.
+    foreach ($span in Get-CrCodeSpans $View.Text) {
+        $View.Select($span.Start, $span.Length)
+        $View.SelectionColor = $Colors[$span.Kind]
+    }
+    $View.Select(0, 0)
 }
 
 function New-CrGlyph {
@@ -930,10 +1129,11 @@ function Show-CrControlWindow {
         $TenantSettings,
         $TenantSettingsRead,
         [hashtable] $Remediation,
-        [string] $StartTab
+        [string] $StartTab,
+        [string] $StartGroup
     )
     $form = New-CrControlForm -Sites $Sites -TenantName $TenantName -SharePointUrl $SharePointUrl -Unfinished $Unfinished -PastScans $PastScans -DefaultLevel $DefaultLevel `
-        -DefaultInclude $DefaultInclude -DefaultSites $DefaultSites -DefaultPace $DefaultPace -About $About -TenantSettings $TenantSettings -TenantSettingsRead $TenantSettingsRead -Remediation $Remediation -StartTab $StartTab
+        -DefaultInclude $DefaultInclude -DefaultSites $DefaultSites -DefaultPace $DefaultPace -About $About -TenantSettings $TenantSettings -TenantSettingsRead $TenantSettingsRead -Remediation $Remediation -StartTab $StartTab -StartGroup $StartGroup
     try {
         [void]$form.ShowDialog()
         $form.Tag

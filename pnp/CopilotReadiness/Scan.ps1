@@ -948,8 +948,23 @@ function New-CrScan {
     $folder
 }
 
+function Get-CrScanRulesProblem {
+    <#
+      Why a stopped scan can't carry on here, or nothing if it can: only under the rules it started
+      with, or its report would mix two rule books. State is OlderRules or NewerRules; Message says what to do.
+    #>
+    param([Parameter(Mandatory)] $Scope)
+    $now = (Get-CrRuleBook).version
+    if ("$($Scope.rulebook)" -eq "$now") { return }
+    $then = 0
+    if ([int]::TryParse("$($Scope.rulebook)", [ref]$then) -and $then -gt [int]$now) {
+        return [pscustomobject]@{ State = 'NewerRules'; Message = "This scan started in a newer version, under newer rules, so it can't be continued here. Continue it in that version, or start a new scan." }
+    }
+    [pscustomobject]@{ State = 'OlderRules'; Message = "This scan started under an older version's rules, so it can't be continued. Start a new scan." }
+}
+
 function Get-CrUnfinishedScan {
-    <# The newest scan in the results folder that never finished (of this tenant, if given), or nothing. #>
+    <# The newest scan in the results folder that never finished and can carry on (of this tenant, if given), or nothing. #>
     param([Parameter(Mandatory)] [string] $ResultsRoot, [string] $Tenant)
     if (-not (Test-Path -LiteralPath $ResultsRoot)) { return }
     Get-ChildItem -LiteralPath $ResultsRoot -Directory | Sort-Object Name -Descending | ForEach-Object {
@@ -958,7 +973,7 @@ function Get-CrUnfinishedScan {
             $scan = Read-CrJson $file
             if ($scan.status -in 'Running', 'Cancelled') {
                 $scope = Read-CrJson (Join-Path $_.FullName 'scope.json')
-                if (-not $Tenant -or $scope.tenant -eq $Tenant) { [pscustomobject]@{ Folder = $_.FullName; Scan = $scan; Scope = $scope } }
+                if ((-not $Tenant -or $scope.tenant -eq $Tenant) -and -not (Get-CrScanRulesProblem $scope)) { [pscustomobject]@{ Folder = $_.FullName; Scan = $scan; Scope = $scope } }
             }
         }
     } | Select-Object -First 1
@@ -968,7 +983,8 @@ function Get-CrPastScans {
     <#
       Every scan in the results folder (of this tenant, if given), newest first: when it
       started, how far it got, how it ended and what it found. State is Completed, Running
-      (a process is on it now) or Stopped (it can be continued).
+      (a process is on it now), Stopped (it can be continued), or OlderRules or NewerRules
+      (stopped, under other rules than this version's, so it can't be).
     #>
     param([Parameter(Mandatory)] [string] $ResultsRoot, [string] $Tenant)
     if (-not (Test-Path -LiteralPath $ResultsRoot)) { return }
@@ -981,7 +997,8 @@ function Get-CrPastScans {
             $scope = Read-CrJson $scopeFile
             if ($Tenant -and $scope.tenant -ne $Tenant) { continue }
             $scan = Read-CrJson $scanFile
-            $state = if ($scan.status -eq 'Completed') { 'Completed' } elseif (Test-CrScanRunning $dir.FullName) { 'Running' } else { 'Stopped' }
+            $other = Get-CrScanRulesProblem $scope
+            $state = if ($scan.status -eq 'Completed') { 'Completed' } elseif (Test-CrScanRunning $dir.FullName) { 'Running' } elseif ($other) { $other.State } else { 'Stopped' }
             $done = if ($state -eq 'Completed') { [int]$scan.sitesDone } else { @(Get-ChildItem -LiteralPath (Join-Path $dir.FullName 'sites') -Filter '*.json').Count }
             $found = [ordered]@{}
             foreach ($s in $severities) { $found[$s] = 0 }
@@ -999,6 +1016,7 @@ function Get-CrPastScans {
                 OneDriveScore = $(if ($scan.PSObject.Properties['oneDriveScore']) { $scan.oneDriveScore } else { $null })
                 Findings  = $(if ($state -eq 'Completed') { $found } else { $null })
                 Report    = $(if (Test-Path -LiteralPath $report) { $report } else { $null })
+                RulesNote = $(if ($state -in 'OlderRules', 'NewerRules') { $other.Message } else { $null })
             }
         }
         catch { continue }   # a folder that isn't a scan, or is half written
@@ -1210,6 +1228,8 @@ function Invoke-CrScan {
 
     if (Test-CrScanRunning $Folder) { throw 'This scan is already running, in the background or another window. Run Start again to see how it is going.' }
     $scope = Read-CrJson (Join-Path $Folder 'scope.json')
+    $otherRules = Get-CrScanRulesProblem $scope
+    if ($otherRules) { throw $otherRules.Message }
     $scanFile = Join-Path $Folder 'scan.json'
     $sitesFolder = Join-Path $Folder 'sites'
     $stopFile = Join-Path $Folder 'stop.request'

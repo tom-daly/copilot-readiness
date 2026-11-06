@@ -186,6 +186,201 @@ try {
     Check 'switching back brings its app back' ($s.app.clientId -eq 'abc' -and $s.app.thumbprint -eq 'DEF' -and $s.sharePointUrl -eq 'https://contoso.sharepoint.com')
     Check 'both tenants are offered' (((Get-CrTenantNames $s) -join ',') -eq 'contoso.onmicrosoft.com,fabrikam.onmicrosoft.com' -and (Get-CrTenantApp $s 'fabrikam').clientId -eq 'fab')
     Check 'an unknown tenant has no app' (-not (Get-CrTenantApp $s 'tailspin').clientId)
+
+    # A newer version in a new folder picks up the setup, with no new app or certificate.
+    $memory = Join-Path $work 'remembered\setup.json'
+    $oldResults = Join-Path $work 'old-copy-results'
+    New-Item -ItemType Directory -Path $oldResults | Out-Null
+    $hasCert = { param($t) $t -eq 'DEF' }
+    $s = Read-CrSettings $settingsFile; Set-CrTenant $s 'contoso'
+    Save-CrRememberedSetup -Settings $s -ResultsFolder $oldResults -Path $memory
+    $newCopy = Join-Path $work 'new-copy-settings.json'
+    $back = Restore-CrRememberedSetup -SettingsPath $newCopy -Path $memory -HasCertificate $hasCert
+    $got = Read-CrSettings $newCopy
+    Check 'a new copy gets the same app and certificate' ($back.Tenant -eq 'contoso.onmicrosoft.com' -and $got.app.clientId -eq 'abc' -and $got.app.thumbprint -eq 'DEF')
+    Check 'and the same results, and the other tenants' ($got.scan.resultsFolder -eq $oldResults -and @($got.otherTenants).Count -eq 1)
+    Set-Content -LiteralPath $newCopy -Value '{ "tenant": "fabrikam.onmicrosoft.com" }'
+    Check 'a copy with its own settings keeps them' ($null -eq (Restore-CrRememberedSetup -SettingsPath $newCopy -Path $memory -HasCertificate $hasCert) -and (Read-CrSettings $newCopy).tenant -eq 'fabrikam.onmicrosoft.com')
+    Remove-Item -LiteralPath $newCopy
+
+    # One tenant's certificate gone: the others and the results aren't lost with it.
+    $back = Restore-CrRememberedSetup -SettingsPath $newCopy -Path $memory -HasCertificate { param($t) $t -eq 'FAB' }
+    $got = Read-CrSettings $newCopy
+    Check 'last tenant has no certificate: starts on one that works' ($back.Ready -and $back.Tenant -eq 'fabrikam.onmicrosoft.com' -and $got.app.clientId -eq 'fab' -and $got.app.thumbprint -eq 'FAB' -and $got.sharePointUrl -eq 'https://fabrikam.sharepoint.com')
+    Check 'and keeps the results, and still offers the other tenant' ($got.scan.resultsFolder -eq $oldResults -and (Get-CrTenantNames $got) -contains 'contoso.onmicrosoft.com')
+    Set-CrTenant $got 'contoso'
+    Check 'which sets itself up again when chosen' (-not $got.app.clientId -and -not $got.app.thumbprint)
+    Remove-Item -LiteralPath $newCopy
+    # The other way round: the last tenant works, another's certificate has gone.
+    $null = Restore-CrRememberedSetup -SettingsPath $newCopy -Path $memory -HasCertificate $hasCert
+    $got = Read-CrSettings $newCopy
+    Check 'another tenant without its certificate sets itself up when chosen' ($got.app.clientId -eq 'abc' -and -not (Get-CrTenantApp $got 'fabrikam').clientId -and (Get-CrTenantNames $got) -contains 'fabrikam.onmicrosoft.com')
+    Remove-Item -LiteralPath $newCopy
+    # No certificates at all: setup runs for the same tenant, using the same results.
+    $back = Restore-CrRememberedSetup -SettingsPath $newCopy -Path $memory -HasCertificate { param($t) $false }
+    $got = Read-CrSettings $newCopy
+    Check 'no certificates on this PC: setup runs, nothing else is lost' (-not $back.Ready -and $got.tenant -eq 'contoso.onmicrosoft.com' -and -not $got.app.clientId -and $got.scan.resultsFolder -eq $oldResults -and @(Get-CrTenantNames $got).Count -eq 2)
+    Remove-Item -LiteralPath $newCopy
+    # The app removed from the last tenant: that tenant goes, the other stays.
+    $removedMemory = Join-Path $work 'remembered\removed.json'
+    $u = Read-CrSettings $memory; $u.app.clientId = ''; $u.app.thumbprint = ''
+    Save-CrRememberedSetup -Settings $u -ResultsFolder $oldResults -Path $removedMemory
+    $back = Restore-CrRememberedSetup -SettingsPath $newCopy -Path $removedMemory -HasCertificate { param($t) $t -eq 'FAB' }
+    Check 'app removed from the last tenant: carries on with the other' ($back.Tenant -eq 'fabrikam.onmicrosoft.com' -and $back.Ready -and @(Get-CrTenantNames (Read-CrSettings $newCopy)).Count -eq 1)
+    Remove-Item -LiteralPath $newCopy
+
+    # An older copy, or one that knows fewer tenants, doesn't lose one added since.
+    $olderMemory = Join-Path $work 'remembered\older.json'
+    Save-CrRememberedSetup -Settings (Read-CrSettings $memory) -ResultsFolder $oldResults -Path $olderMemory
+    $older = New-CrSettings; Set-CrTenant $older 'contoso'; $older.app.clientId = 'abc'; $older.app.thumbprint = 'DEF'
+    Save-CrRememberedSetup -Settings $older -ResultsFolder $oldResults -Path $olderMemory
+    $kept = Read-CrSettings $olderMemory
+    Check 'an older copy saving keeps the tenant it never knew' ($kept.app.clientId -eq 'abc' -and (Get-CrTenantApp $kept 'fabrikam').clientId -eq 'fab')
+    Save-CrRememberedSetup -Settings $older -ResultsFolder $oldResults -Path $olderMemory
+    Check 'and saving twice lists it once' (@((Read-CrSettings $olderMemory).otherTenants).Count -eq 1)
+    $older.app.clientId = ''; $older.app.thumbprint = ''
+    Save-CrRememberedSetup -Settings $older -ResultsFolder $oldResults -Path $olderMemory
+    $kept = Read-CrSettings $olderMemory
+    Check 'removing the app from one tenant leaves the others remembered' (-not $kept.app.clientId -and (Get-CrTenantApp $kept 'fabrikam').clientId -eq 'fab')
+    $last = New-CrSettings; Set-CrTenant $last 'fabrikam'
+    Save-CrRememberedSetup -Settings $last -ResultsFolder $oldResults -Path $olderMemory
+    Check 'with the last app removed, the setup is forgotten' (-not (Test-Path -LiteralPath $olderMemory))
+
+    # Results carried over from an older copy that can't be found: it asks, and changes nothing until told.
+    $null = Restore-CrRememberedSetup -SettingsPath $newCopy -Path $memory -HasCertificate $hasCert
+    $got = Read-CrSettings $newCopy
+    Check 'results still there: nothing to ask' ($null -eq (Get-CrMissingResults -Settings $got) -and $got.scan.resultsFolder -eq $oldResults)
+    Remove-Item -LiteralPath $oldResults -Recurse
+    Check 'results not found: it says which folder, and changes nothing' ((Get-CrMissingResults -Settings $got) -eq $oldResults -and $got.scan.resultsFolder -eq $oldResults -and $got.scan.resultsCarried -eq $oldResults)
+    Check 'and they count again once the drive is back' ($null -eq (Get-CrMissingResults -Settings $got -Exists { param($p) $true }))
+    Set-CrOwnResults -Settings $got
+    Check 'told to start again: back to its own folder, and nothing more to ask' ($got.scan.resultsFolder -eq 'results' -and $null -eq (Get-CrMissingResults -Settings $got))
+    $byHand = New-CrSettings; $byHand.scan.resultsFolder = $oldResults
+    Check 'a results folder set by hand is left to be created' ($null -eq (Get-CrMissingResults -Settings $byHand))
+    Remove-Item -LiteralPath $newCopy
+
+    # A remembered setup that can't be opened right now isn't overwritten; one that makes no sense is.
+    $lockedMemory = Join-Path $work 'remembered\locked.json'
+    $lockedSettings = New-CrSettings; Set-CrTenant $lockedSettings 'contoso'; $lockedSettings.app.clientId = 'abc'; $lockedSettings.app.thumbprint = 'DEF'
+    Save-CrRememberedSetup -Settings $lockedSettings -ResultsFolder $work -Path $lockedMemory
+    $lockedBefore = Get-Content -LiteralPath $lockedMemory -Raw
+    $hold = [IO.File]::Open($lockedMemory, 'Open', 'ReadWrite', 'None')
+    $lockedSettings.app.clientId = 'changed'
+    $why = try { Save-CrRememberedSetup -Settings $lockedSettings -ResultsFolder $work -Path $lockedMemory; '' } catch { $_.Exception.Message }
+    $hold.Dispose()
+    Check 'a remembered setup locked for now is left alone, and it says so' ($why -and (Get-Content -LiteralPath $lockedMemory -Raw) -ceq $lockedBefore)
+    Set-Content -LiteralPath $lockedMemory -Value '{ half a file'
+    Save-CrRememberedSetup -Settings $lockedSettings -ResultsFolder $work -Path $lockedMemory
+    Check 'one that makes no sense is replaced' ((Read-CrSettings $lockedMemory).app.clientId -eq 'changed')
+    Remove-Item -LiteralPath $lockedMemory
+
+    # A certificate that can't sign in counts as gone, so setup runs by itself.
+    Check 'a certificate in date with its private key can sign in' (Test-CrCertificateUsable ([pscustomobject]@{ HasPrivateKey = $true; NotAfter = (Get-Date).AddDays(30) }))
+    Check 'an expired one can''t' (-not (Test-CrCertificateUsable ([pscustomobject]@{ HasPrivateKey = $true; NotAfter = (Get-Date).AddDays(-1) })))
+    Check 'nor one with no private key' (-not (Test-CrCertificateUsable ([pscustomobject]@{ HasPrivateKey = $false; NotAfter = (Get-Date).AddDays(30) })))
+    Check 'nor one that isn''t there' (-not (Test-CrCertificateUsable $null))
+
+    # When an app was made reads back as written, whatever the time zone.
+    $when = '2026-11-06T21:33:00.0000000+00:00'
+    $dated = Join-Path $work 'dated-settings.json'
+    Set-Content -LiteralPath $dated -Value "{ `"app`": { `"clientId`": `"abc`", `"createdAt`": `"$when`" } }"
+    $readBack = Read-CrSettings $dated
+    Check "when an app was made reads back exactly (got $($readBack.app.createdAt))" ("$($readBack.app.createdAt)" -ceq $when)
+    Save-CrSettings $dated $readBack
+    Check 'and stays the same when saved again' ("$((Read-CrSettings $dated).app.createdAt)" -ceq $when)
+    Remove-Item -LiteralPath $dated
+
+    # An older copy's out-of-date entry for another tenant doesn't replace what's remembered.
+    $staleCopyMemory = Join-Path $work 'remembered\stale-copy.json'
+    $newest = New-CrSettings; Set-CrTenant $newest 'contoso'; $newest.app.clientId = 'abc'; $newest.app.thumbprint = 'DEF'
+    $newest.otherTenants = @([pscustomobject]@{ tenant = 'fabrikam.onmicrosoft.com'; sharePointUrl = 'https://fabrikam.sharepoint.com'; clientId = 'fab'; thumbprint = 'NEW' })
+    Save-CrRememberedSetup -Settings $newest -ResultsFolder $work -Path $staleCopyMemory
+    $oldCopy = $newest | ConvertTo-Json -Depth 5 | ConvertFrom-Json; $oldCopy.otherTenants[0].thumbprint = 'OLD'
+    Save-CrRememberedSetup -Settings $oldCopy -ResultsFolder $work -Path $staleCopyMemory
+    Check 'an older copy doesn''t bring back a replaced certificate' ((Get-CrTenantApp (Read-CrSettings $staleCopyMemory) 'fabrikam').thumbprint -eq 'NEW')
+    $switched = Read-CrSettings $staleCopyMemory; Set-CrTenant $switched 'fabrikam'; $switched.app.thumbprint = 'NEWER'
+    Save-CrRememberedSetup -Settings $switched -ResultsFolder $work -Path $staleCopyMemory
+    Check 'but the tenant just used is up to date' ((Read-CrSettings $staleCopyMemory).app.thumbprint -eq 'NEWER')
+    Remove-Item -LiteralPath $staleCopyMemory
+
+    # A remembered setup that can't be read says so, and a stale-site limit that was only the default follows the rule book.
+    $damagedMemory = Join-Path $work 'remembered\damaged.json'
+    Set-Content -LiteralPath $damagedMemory -Value '{ half a file'
+    $why = try { Restore-CrRememberedSetup -SettingsPath $newCopy -Path $damagedMemory -HasCertificate $hasCert; '' } catch { $_.Exception.Message }
+    Check 'a damaged remembered setup is reported' ($why -and -not (Test-Path -LiteralPath $newCopy))
+    Remove-Item -LiteralPath $damagedMemory
+    $staleMemory = Join-Path $work 'remembered\stale.json'
+    $stale = New-CrSettings; Set-CrTenant $stale 'contoso'; $stale.app.clientId = 'abc'; $stale.app.thumbprint = 'DEF'
+    Save-CrRememberedSetup -Settings $stale -ResultsFolder $work -Path $staleMemory
+    $file = Get-Content -LiteralPath $staleMemory -Raw | ConvertFrom-Json; $file.scan.staleDays = 11; $file.scan.staleDaysDefault = 11
+    $file | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $staleMemory
+    $null = Restore-CrRememberedSetup -SettingsPath $newCopy -Path $staleMemory -HasCertificate $hasCert
+    Check 'an old default stale-site limit follows the new rule book' ((Read-CrSettings $newCopy).scan.staleDays -eq (Get-CrRuleBook).thresholds.staleDays -and -not (Read-CrSettings $newCopy).scan.PSObject.Properties['staleDaysDefault'])
+    Remove-Item -LiteralPath $newCopy
+    $file.scan.staleDays = 45
+    $file | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $staleMemory
+    $null = Restore-CrRememberedSetup -SettingsPath $newCopy -Path $staleMemory -HasCertificate $hasCert
+    Check 'one somebody chose stays' ((Read-CrSettings $newCopy).scan.staleDays -eq 45)
+    Remove-Item -LiteralPath $newCopy, $staleMemory
+
+    # Which results are remembered, when a copy is on a different folder from them.
+    $whereMemory = Join-Path $work 'remembered\where.json'
+    $rememberedFolder = Join-Path $work 'remembered-results'
+    $ownFolder = Join-Path $work 'own-results'
+    New-Item -ItemType Directory -Path $rememberedFolder | Out-Null
+    $onOwn = New-CrSettings; Set-CrTenant $onOwn 'contoso'; $onOwn.app.clientId = 'abc'; $onOwn.app.thumbprint = 'DEF'
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $rememberedFolder -Path $whereMemory
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $ownFolder -Path $whereMemory
+    Check 'an older copy on its own folder doesn''t replace remembered results still there' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $rememberedFolder)
+    $moved = Read-CrSettings $whereMemory; $moved.scan.resultsFolder = 'results'; $moved.scan.resultsCarried = $rememberedFolder
+    Save-CrRememberedSetup -Settings $moved -ResultsFolder $ownFolder -Path $whereMemory
+    Check 'moving away from carried results on purpose does' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $ownFolder)
+    $handSet = Read-CrSettings $whereMemory; $handSet.scan.resultsFolder = $rememberedFolder; $handSet.scan.resultsCarried = ''
+    Save-CrRememberedSetup -Settings $handSet -ResultsFolder $rememberedFolder -Path $whereMemory
+    Check 'and so does a folder set by hand' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $rememberedFolder)
+    # A copy on its own folder takes over once its newest scan is newer, or when the person chose it.
+    Save-CrRememberedSetup -Settings $handSet -ResultsFolder $rememberedFolder -Path $whereMemory
+    New-Item -ItemType Directory -Path $ownFolder, (Join-Path $rememberedFolder '20260101T000000-aaaa') -Force | Out-Null
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $ownFolder -Path $whereMemory
+    Check 'with no scan of its own it doesn''t' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $rememberedFolder)
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $ownFolder -Path $whereMemory -TakeOver
+    Check 'told to, it does' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $ownFolder)
+    Save-CrRememberedSetup -Settings $handSet -ResultsFolder $rememberedFolder -Path $whereMemory
+    New-Item -ItemType Directory -Path (Join-Path $ownFolder '20250101T000000-bbbb') -Force | Out-Null
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $ownFolder -Path $whereMemory
+    Check 'an older scan of its own doesn''t count' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $rememberedFolder)
+    New-Item -ItemType Directory -Path (Join-Path $ownFolder '20270101T000000-cccc') -Force | Out-Null
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $ownFolder -Path $whereMemory
+    Check 'a newer scan of its own does' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $ownFolder)
+    # Saving the same again leaves the file alone, and a half-written temporary file is never left behind.
+    (Get-Item -LiteralPath $whereMemory).LastWriteTime = [DateTime]'2020-01-01'
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $ownFolder -Path $whereMemory
+    Check 'nothing new: the file isn''t written again' ((Get-Item -LiteralPath $whereMemory).LastWriteTime -eq [DateTime]'2020-01-01' -and -not (Test-Path -LiteralPath "$whereMemory.tmp"))
+    # A tenant blanked in one copy doesn't replace a working one in what's remembered.
+    $blankMemory = Join-Path $work 'remembered\blank.json'
+    $working = New-CrSettings; Set-CrTenant $working 'contoso'; $working.app.clientId = 'abc'; $working.app.thumbprint = 'DEF'
+    $working.otherTenants = @([pscustomobject]@{ tenant = 'fabrikam.onmicrosoft.com'; sharePointUrl = 'https://fabrikam.sharepoint.com'; clientId = 'fab'; thumbprint = 'FAB' })
+    Save-CrRememberedSetup -Settings $working -ResultsFolder $work -Path $blankMemory
+    $blanked = $working | ConvertTo-Json -Depth 5 | ConvertFrom-Json; $blanked.otherTenants[0].clientId = ''; $blanked.otherTenants[0].thumbprint = ''
+    Save-CrRememberedSetup -Settings $blanked -ResultsFolder $work -Path $blankMemory
+    $kept = Read-CrSettings $blankMemory
+    Check 'a tenant blanked in one copy stays working in what''s remembered, and listed once' ((Get-CrTenantApp $kept 'fabrikam').clientId -eq 'fab' -and @($kept.otherTenants | Where-Object tenant -EQ 'fabrikam.onmicrosoft.com').Count -eq 1)
+    Save-CrRememberedSetup -Settings $handSet -ResultsFolder $rememberedFolder -Path $whereMemory
+    Remove-Item -LiteralPath $rememberedFolder -Recurse
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $ownFolder -Path $whereMemory
+    $carriedCopy = $onOwn | ConvertTo-Json -Depth 5 | ConvertFrom-Json; $carriedCopy.scan.resultsFolder = $ownFolder; $carriedCopy.scan.resultsCarried = $ownFolder
+    Save-CrRememberedSetup -Settings $carriedCopy -ResultsFolder $ownFolder -Path $whereMemory
+    Check 'nor does an older copy on carried results replace them' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $rememberedFolder)
+    $unplugged = Read-CrSettings $whereMemory
+    Check 'remembered results it can''t see stay remembered, even with newer scans of its own' ($unplugged.scan.resultsFolder -eq $rememberedFolder)
+    Save-CrRememberedSetup -Settings $onOwn -ResultsFolder $ownFolder -Path $whereMemory -TakeOver
+    Check 'until the person chooses this folder' ((Read-CrSettings $whereMemory).scan.resultsFolder -eq $ownFolder)
+
+    $s = Read-CrSettings $memory; $s.app.clientId = ''; $s.app.thumbprint = ''; $s.otherTenants = @()
+    Save-CrRememberedSetup -Settings $s -ResultsFolder $work -Path $memory
+    Check 'with the app removed, the remembered tenants stay until each is removed' (Test-Path -LiteralPath $memory)
+    Remove-Item -LiteralPath $memory
+    Check 'nothing remembered: nothing restored' ($null -eq (Restore-CrRememberedSetup -SettingsPath $newCopy -Path $memory -HasCertificate $hasCert))
     $names = 'https://fabrikam.sharepoint.com/', 'fabrikam.sharepoint.com', 'https://Fabrikam-admin.sharepoint.com/_layouts/15/online/AdminHome.aspx', 'https://fabrikam-my.sharepoint.com/personal/x', 'https://fabrikam.sharepoint.com/sites/finance', ' fabrikam ', 'fabrikam.onmicrosoft.com'
     Check "a pasted SharePoint address gives the tenant (got $(($names | ForEach-Object { ConvertTo-CrTenantName $_ }) -join ', '))" (@($names | ForEach-Object { ConvertTo-CrTenantName $_ } | Sort-Object -Unique) -join ',' -eq 'fabrikam.onmicrosoft.com')
     $n = New-CrSettings; Set-CrTenant $n 'https://fabrikam.sharepoint.com/'
@@ -368,6 +563,44 @@ try {
     Check "past scans list the stopped scan, how far it got and no findings yet (got $($past.Count), $($past[0].State), $($past[0].Done) of $($past[0].Total))" (
         $past.Count -eq 1 -and $past[0].Folder -eq $folder -and $past[0].State -eq 'Stopped' -and $past[0].Done -eq $past[0].Total - 1 -and $null -eq $past[0].Findings)
     Check 'past scans leave out other tenants' (@(Get-CrPastScans $work -Tenant 'fabrikam.onmicrosoft.com').Count -eq 0)
+
+    # A stopped scan from before the rules changed can't be continued: its report would mix two rule books.
+    $olderRoot = Join-Path $work 'older-rules'
+    $olderScan = Join-Path $olderRoot 'scan'
+    New-Item -ItemType Directory -Path $olderRoot | Out-Null
+    Copy-Item $folder $olderScan -Recurse
+    Remove-Item (Join-Path $olderScan 'progress.json') -ErrorAction SilentlyContinue
+    $oldScope = Get-Content (Join-Path $olderScan 'scope.json') -Raw | ConvertFrom-Json
+    $oldScope.rulebook = -1
+    $oldScope | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $olderScan 'scope.json')
+    Check 'older rules: not offered to continue' ($null -eq (Get-CrUnfinishedScan $olderRoot))
+    Check 'older rules: past scans say so' (@(Get-CrPastScans $olderRoot)[0].State -eq 'OlderRules' -and @(Get-CrPastScans $olderRoot)[0].RulesNote -like "*older version's rules*")
+    $oldView = Get-CrProgressView $olderScan
+    Check 'older rules: the progress window has no Continue, and says why' (-not $oldView.CanCarryOn -and $oldView.Status -like "*older version's rules*")
+    $refused = try { Invoke-CrScan -Folder $olderScan 3>$null 6>$null; '' } catch { $_.Exception.Message }
+    Check 'older rules: it can''t be run anyway' ($refused -like "*older version's rules*")
+    # And the other way round: this copy is the older one.
+    $oldScope.rulebook = [int](Get-CrRuleBook).version + 1
+    $oldScope | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $olderScan 'scope.json')
+    Write-CrJson (Join-Path $olderScan 'progress.json') ([pscustomobject]@{ state = 'Stopping'; pid = $PID; processStartedAt = (Get-CrProcessStamp (Get-Process -Id $PID)); done = 0; failed = 0; current = @() })
+    $stoppingView = Get-CrProgressView $olderScan
+    Check "newer rules: stopping doesn't promise it can continue (got $($stoppingView.State): $($stoppingView.Status))" ($stoppingView.State -eq 'Stopping' -and $stoppingView.Status -notlike '*when you continue*')
+    Remove-Item (Join-Path $olderScan 'progress.json')
+    Check 'newer rules: not offered to continue either' ($null -eq (Get-CrUnfinishedScan $olderRoot))
+    Check 'newer rules: past scans say so' (@(Get-CrPastScans $olderRoot)[0].State -eq 'NewerRules')
+    $oldView = Get-CrProgressView $olderScan
+    $failedProgress = [pscustomobject]@{ state = 'Failed'; pid = 0; error = 'This scan started in a newer version, under newer rules, so it can''t be continued here. Continue it in that version, or start a new scan.'; done = 0; failed = 0 }
+    Write-CrJson (Join-Path $olderScan 'progress.json') $failedProgress
+    $failedView = Get-CrProgressView $olderScan
+    Check "newer rules: a refused scan says why once (got $($failedView.Status))" (@([regex]::Matches($failedView.Status, 'newer version')).Count -eq 1)
+    Remove-Item (Join-Path $olderScan 'progress.json')
+    # A real problem isn't hidden by the note about rules.
+    $failedProgress.error = 'Sign-in was refused.'
+    Write-CrJson (Join-Path $olderScan 'progress.json') $failedProgress
+    Check 'newer rules: a scan that failed for another reason still says what went wrong' ((Get-CrProgressView $olderScan).Status -like '*Sign-in was refused.*Continue it in that version*')
+    Remove-Item (Join-Path $olderScan 'progress.json')
+    Check 'newer rules: it says to continue in the newer version' (-not $oldView.CanCarryOn -and $oldView.Status -like '*Continue it in that version*')
+    Remove-Item $olderRoot -Recurse -Force
     $spare = Join-Path $work 'spare-scan'
     Copy-Item $folder $spare -Recurse
     Check 'a past scan can be removed' ((Remove-CrScan $spare -Permanently) -and -not (Test-Path $spare))
@@ -490,6 +723,61 @@ try {
     Check 'tenant: every link is a web address' (-not @($linked | ForEach-Object Links | Where-Object { $_.Url -notmatch '^https://' }).Count)
     Check 'tenant: admin center links go to this tenant''s admin center' ((@($linked | ForEach-Object Links | Where-Object Text -EQ 'Open the SharePoint admin center').Url | Sort-Object -Unique) -like 'https://contoso-admin.sharepoint.com/*')
     Check 'tenant: without a SharePoint address there are no admin center links' (-not @($tenantView | ForEach-Object Rows | ForEach-Object Links | Where-Object Text -EQ 'Open the SharePoint admin center').Count)
+    # The PowerShell to change a setting, for SPO and PnP, ready to copy.
+    Check 'tenant: no button just points at a PowerShell page any more' (-not @($linked | ForEach-Object Links | Where-Object Text -EQ 'The PowerShell command').Count)
+    $commandValues = [ordered]@{ CoreOrganizationSharingLinkMaxExpirationInDays = 0; OneDriveOrganizationSharingLinkMaxExpirationInDays = 0; OneDriveDefaultShareLinkScope = 'Organization'; ShowEveryoneExceptExternalUsersClaim = $true; ShowEveryoneClaim = $true; DisableDocumentLibraryDefaultLabeling = $true; RestrictedSearchMode = 'Enabled'; ODBMembersCanShare = 'On'; SharingCapability = 'Disabled' }
+    $commandRows = @((Get-CrTenantSettingsView $commandValues -SharePointUrl 'https://contoso.sharepoint.com') | ForEach-Object Rows)
+    $withCommands = @($commandRows | Where-Object { @($_.Commands).Count })
+    Check "tenant: every setting with no admin center page has its commands (got $($withCommands.Count))" ($withCommands.Count -eq 8)
+    Check 'tenant: each has SPO and PnP' (-not @($withCommands | Where-Object { (@($_.Commands.Tool) -join ',') -ne 'SPO,PnP' }).Count)
+    Check 'tenant: PnP says how to set up a client ID, and SPO needs none' (-not @($withCommands | Where-Object { $_.Commands[1].Help.Url -notmatch '^https://pnp\.github\.io/' -or -not $_.Commands[1].Help.Icon -or $_.Commands[0].Help }).Count)
+    Check 'tenant: SPO commands only use SPO, and PnP only PnP' (-not @($withCommands | ForEach-Object Commands | Where-Object { ($_.Tool -eq 'SPO' -and $_.Text -match '-PnP|PnPOnline') -or ($_.Tool -eq 'PnP' -and $_.Text -match '-SPO|SPOService') }).Count)
+    Check 'tenant: the commands name this tenant''s admin center' (-not @($withCommands | ForEach-Object Commands | Where-Object { $_.Text -notmatch '-Url https://contoso-admin\.sharepoint\.com' }).Count)
+    Check 'tenant: without a SharePoint address they say where to put the tenant' ((@((Get-CrTenantSettingsView $commandValues) | ForEach-Object Rows | Where-Object Name -Like 'People with edit*')[0].Commands[0].Text) -match 'https://<tenant>-admin\.sharepoint\.com')
+    $reshare = { param($v) @((Get-CrTenantSettingsView ([ordered]@{ ODBMembersCanShare = $v })) | ForEach-Object Rows | Where-Object Name -Like 'People with edit*')[0] }
+    Check 'tenant: edit access can reshare in OneDrive is marked' ((& $reshare 'On').State -eq 'Watch' -and (& $reshare 'On').Value -eq 'Yes')
+    Check 'tenant: each owner deciding is marked too' ((& $reshare 'Unspecified').State -eq 'Watch' -and (& $reshare 'Unspecified').Value -like 'Each*')
+    Check 'tenant: only the owner sharing is good' ((& $reshare 'Off').State -eq 'Good')
+    Check 'tenant: the reshare commands match what was asked for' ((& $reshare 'On').Commands[0].Text -match 'Get-SPOTenant \| Select-Object ODBMembersCanShare' -and (& $reshare 'On').Commands[0].Text -match 'Set-SPOTenant -ODBMembersCanShare Off' -and (& $reshare 'On').Commands[1].Text -match '\(Get-PnPTenant\)\.ODBMembersCanShare' -and (& $reshare 'On').Commands[1].Text -match 'Set-PnPTenant -ODBMembersCanShare Off')
+    Check 'tenant: undo puts back what this tenant has now' ((& $reshare 'Unspecified').Commands[1].Text -match '(?m)^# Set-PnPTenant -ODBMembersCanShare Unspecified' -and (& $reshare 'On').Commands[0].Text -match '(?m)^# Set-SPOTenant -ODBMembersCanShare On')
+    # Pasting a whole block makes the change and leaves it made.
+    $blocks = @($withCommands | ForEach-Object Commands)
+    Check 'tenant: each block makes one change, and the undo is only a note' (-not @($blocks | Where-Object { @([regex]::Matches($_.Text, '(?m)^Set-')).Count -ne 1 }).Count)
+    $spoBroken = @($blocks | Where-Object Tool -EQ 'SPO' | Where-Object { $errors = $null; $null = [System.Management.Automation.Language.Parser]::ParseInput($_.Text, [ref]$null, [ref]$errors); @($errors).Count })
+    Check "tenant: every SPO block can be pasted as it is (got $($spoBroken.Count) that can't)" (-not $spoBroken.Count)
+    # A setting that's already right offers nothing that could make it worse.
+    Check 'tenant: only the owner sharing offers no commands' (-not @((& $reshare 'Off').Commands).Count)
+    Check 'tenant: and says nothing needs changing, as there is no button' ((& $reshare 'Off').Where -like "*doesn't need changing now*" -and (& $reshare 'On').Where -notlike '*need changing*')
+    Check 'tenant: SPO says what to do if its module is too old' ((& $reshare 'On').Commands[0].Caption -like '*Update-Module Microsoft.Online.SharePoint.PowerShell*')
+    $stricter = @((Get-CrTenantSettingsView ([ordered]@{ CoreOrganizationSharingLinkMaxExpirationInDays = 30 })) | ForEach-Object Rows)[0]
+    Check 'tenant: links already expiring sooner than 90 days offer no commands' ($stricter.State -eq 'Good' -and -not @($stricter.Commands).Count)
+    $noLimit = @((Get-CrTenantSettingsView ([ordered]@{ CoreOrganizationSharingLinkMaxExpirationInDays = 0 })) | ForEach-Object Rows)[0]
+    Check 'tenant: links with no limit offer 90 days, and undo goes back to no limit' ($noLimit.Commands[1].Text -match '(?m)^Set-PnPTenant -CoreOrganizationSharingLinkMaxExpirationInDays 90' -and $noLimit.Commands[1].Text -match '(?m)^# Set-PnPTenant -CoreOrganizationSharingLinkMaxExpirationInDays 0')
+    $search = { param($v) @((Get-CrTenantSettingsView ([ordered]@{ RestrictedSearchMode = $v })) | ForEach-Object Rows)[0] }
+    Check 'tenant: Restricted Search that is on can be turned off, with no undo offered' ((& $search 'Enabled').Commands[0].Text -match 'Set-SPOTenantRestrictedSearchMode -Mode Disabled' -and (& $search 'Enabled').Commands[1].Text -match 'Set-PnPTenantRestrictedSearchMode -Mode Disabled' -and (& $search 'Enabled').Commands[0].Text -notmatch 'To undo')
+    Check 'tenant: Restricted Search that is off shows no commands' (-not @((& $search 'Disabled').Commands).Count)
+    $groupsOf = Get-CrTenantSettingsView ([ordered]@{ SharingCapability = 'Disabled'; ODBMembersCanShare = 'On'; DefaultLinkPermission = 'Edit'; ExternalUserExpirationRequired = $false; RestrictedSearchMode = 'Disabled'; OneDriveSharingCapability = 'ExternalUserSharingOnly' })
+    Check 'tenant: settings come in the groups the tabs show' ((@($groupsOf.Name) -join ',') -eq 'Who can share,Links,Guests,Copilot and search')
+    Check 'tenant: each setting is in its group' ((@($groupsOf | Where-Object Name -EQ 'Who can share').Rows.Name -contains 'People with edit access can reshare in OneDrive') -and (@($groupsOf | Where-Object Name -EQ 'Links').Rows.Name -contains 'Default link lets people') -and (@($groupsOf | Where-Object Name -EQ 'Guests').Rows.Name -contains 'Guest access expires'))
+    $spansOf = { param($text) @(Get-CrCodeSpans $text | ForEach-Object { "$($_.Kind):$($text.Substring($_.Start, $_.Length))" }) -join '|' }
+    Check 'code colours: a comment is all one colour' ((& $spansOf "# Only the OneDrive's owner can share") -eq "Comment:# Only the OneDrive's owner can share")
+    $got = & $spansOf 'Set-PnPTenant -ODBMembersCanShare Off'
+    Check "code colours: command, option and value (got $got)" ($got -eq 'Command:Set-PnPTenant|Option:-ODBMembersCanShare|Value:Off')
+    $got = & $spansOf 'Connect-PnPOnline -Url https://contoso-admin.sharepoint.com -Interactive -ClientId <your-app-client-id>'
+    Check "code colours: an address and something to fill in are values (got $got)" ($got -eq 'Command:Connect-PnPOnline|Option:-Url|Value:https://contoso-admin.sharepoint.com|Option:-Interactive|Option:-ClientId|Value:<your-app-client-id>')
+    $got = & $spansOf "Set-SPOTenant -ShowEveryoneClaim `$false`n(Get-PnPTenant).ShowEveryoneClaim`nGet-SPOTenant | Select-Object ShowEveryoneClaim"
+    Check "code colours: true or false, and later lines (got $got)" ($got -eq 'Command:Set-SPOTenant|Option:-ShowEveryoneClaim|Variable:$false|Command:Get-PnPTenant|Command:Get-SPOTenant|Command:Select-Object')
+    # Longer than we recommend isn't good, whatever the setting.
+    $lasting = @(Get-CrTenantSettingsView ([ordered]@{ SharingCapability = 'ExternalUserAndGuestSharing'; RequireAnonymousLinksExpireInDays = 365; CoreOrganizationSharingLinkMaxExpirationInDays = 365; OneDriveOrganizationSharingLinkMaxExpirationInDays = 91; ExternalUserExpirationRequired = $true; ExternalUserExpireInDays = 365 }) | ForEach-Object Rows)
+    $stateOf = { param($name) @($lasting | Where-Object Name -EQ $name)[0].State }
+    Check 'tenant: links and guests lasting longer than recommended are marked' ((& $stateOf '"Anyone" links expire') -eq 'Watch' -and (& $stateOf 'Company-wide links expire') -eq 'Watch' -and (& $stateOf 'Company-wide links in OneDrive expire') -eq 'Watch' -and (& $stateOf 'Guest access expires') -eq 'Watch')
+    Check 'tenant: and company-wide links offer to lower it, with undo to what it is now' (@($lasting | Where-Object Name -EQ 'Company-wide links expire')[0].Commands[1].Text -match '(?m)^# Set-PnPTenant -CoreOrganizationSharingLinkMaxExpirationInDays 365')
+    $atLimit = @(Get-CrTenantSettingsView ([ordered]@{ SharingCapability = 'ExternalUserAndGuestSharing'; RequireAnonymousLinksExpireInDays = 30; ExternalUserExpirationRequired = $true; ExternalUserExpireInDays = 60 }) | ForEach-Object Rows)
+    Check 'tenant: right at what we recommend is good' (@($atLimit | Where-Object Name -EQ '"Anyone" links expire')[0].State -eq 'Good' -and @($atLimit | Where-Object Name -EQ 'Guest access expires')[0].State -eq 'Good')
+    Check 'tenant: "Anyone" links that are turned off aren''t marked for lasting long' (@(Get-CrTenantSettingsView ([ordered]@{ SharingCapability = 'Disabled'; RequireAnonymousLinksExpireInDays = 365 }) | ForEach-Object Rows | Where-Object Name -EQ '"Anyone" links expire')[0].State -eq 'Good')
+    Check 'tenant: the 90-day limit in the card, its advice and its command all match' (@($lasting | Where-Object Name -EQ 'Company-wide links expire')[0].Recommended -like '*90 days*' -and @($lasting | Where-Object Name -EQ 'Company-wide links expire')[0].Advice -like '*90 days*' -and @($lasting | Where-Object Name -EQ 'Company-wide links expire')[0].Commands[1].Text -match 'InDays 90')
+    $noRole = @(Get-CrTenantSettingsView ([ordered]@{ DefaultLinkPermission = 'None' }) | ForEach-Object Rows)[0]
+    Check 'tenant: a default permission nobody chose says so, and isn''t marked good' ($noRole.Value -eq "Microsoft's default" -and $noRole.State -eq 'Info')
     Check 'tenant: newer link settings win once set' ((@((Get-CrTenantSettingsView ([ordered]@{ DefaultSharingLinkType = 'Internal'; CoreDefaultShareLinkScope = 'SpecificPeople' })).Rows) | Where-Object Name -EQ 'Link people get by default').Value -eq 'Specific people')}
 catch {
     $problems.Add("threw: $($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)")

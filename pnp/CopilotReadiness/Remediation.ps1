@@ -221,6 +221,25 @@ function New-CrFix {
     $folder
 }
 
+function Get-CrTickedInPlace {
+    <# How many of the chosen sites are of this kind (SharePoint, Team, Channel or OneDrive). PlaceOf gives each site's kind by address. #>
+    param([AllowEmptyCollection()] [string[]] $Chosen = @(), [Parameter(Mandatory)] $PlaceOf, [Parameter(Mandatory)] [string] $Place)
+    @($Chosen | Where-Object { $PlaceOf[$_] -eq $Place }).Count
+}
+
+function Get-CrChosenNotShown {
+    <#
+      How many chosen sites aren't in the list on screen, whether a search, a filter or the list's
+      limit left them out. Known holds the tenant's sites by address: a chosen site no longer in the
+      tenant doesn't count, because it won't be previewed.
+    #>
+    param([AllowEmptyCollection()] [string[]] $Chosen = @(), [AllowEmptyCollection()] [string[]] $Shown = @(), [Parameter(Mandatory)] $Known)
+    $inList = [System.Collections.Generic.HashSet[string]]::new([string[]]@($Shown), [StringComparer]::OrdinalIgnoreCase)
+    $count = 0
+    foreach ($url in $Chosen) { if ($Known.ContainsKey($url) -and -not $inList.Contains($url)) { $count++ } }
+    $count
+}
+
 function Write-CrFixProgress {
     <#
       Writes progress.json for a fix: which process, which step (Preview or Remove), its

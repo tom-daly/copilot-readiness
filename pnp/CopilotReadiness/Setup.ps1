@@ -22,6 +22,13 @@ function New-CrAdminGraph {
     }.GetNewClosure()
 }
 
+function Get-CrAppsNamed {
+    <# Every app in the tenant with this name. Graph is what New-CrAdminGraph returns. #>
+    param([Parameter(Mandatory)] [scriptblock] $Graph, [Parameter(Mandatory)] [string] $AppName)
+    $filter = [uri]::EscapeDataString("displayName eq '$($AppName.Replace("'", "''"))'")
+    @((& $Graph GET "applications?`$filter=$filter&`$select=id,appId,displayName").value)
+}
+
 function Merge-CrKeyCredentials {
     <#
       The app's certificate list with this one added, or nothing if it's already there.
@@ -61,18 +68,19 @@ function Add-CrCertificateToApp {
       Microsoft has no way to change the list only if nobody else just did, so two PCs joining
       together could each overwrite the other. And right after a change it can answer with the old
       list. So this reads the list back after a pause, and puts back anything that went missing,
-      until the list is right. Graph is what New-CrAdminGraph returns.
+      until the list is right. Graph is what New-CrAdminGraph returns. KeepOnFailure is for a
+      certificate this PC was already using: if this fails, it stays on the app for what uses it.
     #>
     param(
         [Parameter(Mandatory)] [scriptblock] $Graph,
         [Parameter(Mandatory)] [string] $AppName,
         [Parameter(Mandatory)] [System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate,
         [string] $Replace,
+        [switch] $KeepOnFailure,
         [int] $Checks = 6,
         [scriptblock] $Sleep = { Start-Sleep -Seconds (Get-Random -Minimum 10 -Maximum 21) }
     )
-    $filter = [uri]::EscapeDataString("displayName eq '$($AppName.Replace("'", "''"))'")
-    $apps = @((& $Graph GET "applications?`$filter=$filter&`$select=id,appId,displayName").value)
+    $apps = @(Get-CrAppsNamed -Graph $Graph -AppName $AppName)
     if ($apps.Count -eq 0) { throw "Microsoft said the app '$AppName' already exists, but it can't be found. Check you signed in as a Global Administrator, then start again." }
     if ($apps.Count -gt 1) {
         throw ("This tenant has $($apps.Count) apps called '$AppName', with these app IDs: $($apps.appId -join ', '). " +
@@ -106,7 +114,7 @@ function Add-CrCertificateToApp {
     }
     catch {
         # Don't leave an entry nobody can use. If this fails too, the error above is still what matters.
-        if ($wrote) { try { Remove-CrCertificateFromApp -Graph $Graph -ObjectId $found.id -Thumbprint $Certificate.Thumbprint } catch { } }
+        if ($wrote -and -not $KeepOnFailure) { try { Remove-CrCertificateFromApp -Graph $Graph -ObjectId $found.id -Thumbprint $Certificate.Thumbprint } catch { } }
         throw
     }
 
@@ -119,6 +127,22 @@ function Add-CrCertificateToApp {
     }
     catch { $accepted = $null }
     [pscustomobject]@{ AppId = "$($found.appId)"; ObjectId = "$($found.id)"; Accepted = $accepted }
+}
+
+function Get-CrReusableCertificate {
+    <#
+      A certificate already on this PC that the tenant's app already accepts, so there's no need
+      to add another: the one lasting longest, with its private key and at least a month to run.
+      Other tenants' apps share the name, so being on this tenant's app is what counts. Nothing
+      if there's none, or the app can't be picked out; adding a certificate then says why.
+    #>
+    param([Parameter(Mandatory)] [scriptblock] $Graph, [Parameter(Mandatory)] [string] $AppName, [object[]] $Certificates = @())
+    $usable = @($Certificates | Where-Object { $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date).AddDays(30) })
+    if (-not $usable.Count) { return }
+    $apps = @(Get-CrAppsNamed -Graph $Graph -AppName $AppName)
+    if ($apps.Count -ne 1) { return }
+    $onApp = @((& $Graph GET "applications/$($apps[0].id)?`$select=keyCredentials").keyCredentials | ForEach-Object { "$($_.customKeyIdentifier)" })
+    @($usable | Where-Object { $onApp -contains $_.Thumbprint } | Sort-Object NotAfter -Descending) | Select-Object -First 1
 }
 
 function Get-CrAppCertificates {

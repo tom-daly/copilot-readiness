@@ -11,6 +11,12 @@
 | After 20 minutes, **Microsoft still won't let it read your sites** | The permissions may not have been accepted. In the Entra admin center, open **App registrations**, then **Copilot Readiness Scanner (PnP)**, then **API permissions**. Each one should say **Granted**. Then start again. |
 | **This tenant has 2 apps called...** | In the Entra admin center, under **App registrations**, delete the ones nobody uses so that one is left. Then start again. |
 | The scan stopped, or the PC restarted | Double-click **Start.cmd** and press **Continue that scan**. Nothing already finished is lost. |
+| A newer version asks you to set up or sign in as an administrator again | This happens once when moving up from version 1.2.1 or earlier, or if this computer's certificate or remembered setup has gone. See [Getting a newer version](install.md#getting-a-newer-version). If the certificate is still on this computer and on the app, it's used again and no new one is added. |
+| A newer version shows no past scans | Your results are in the older version's `results` folder. If that folder still exists, copy its `results` folder into the new version's folder, and set **scan.resultsFolder** in `settings.json` back to `results`. |
+| **Can't save results in...** | The results folder can't be reached. If it's on a network or USB drive, connect the drive and try again. Otherwise change **scan.resultsFolder** in `settings.json`. |
+| **Your past scans can't be found** | They're in a folder the new version can't see. If it's on a network or USB drive, connect the drive and press **Look again**. If you deleted the folder, press **Start a new results folder**. |
+| A stopped scan says **Stopped, older rules** | It started under an older version whose rules have since changed, so it can't be continued. Start a new scan. |
+| A stopped scan says **Stopped, newer rules** | It started in a newer version than the one you've opened. Continue it in that version, or start a new scan. |
 | A window has a red heading saying something went wrong | Read the message at the bottom. It stays open until you close it. The same lines are kept in the `logs` folder, which is useful if you ask for help. What the background scan printed is in `scan.log` and `scan-errors.log` in the scan's folder. |
 
 For help, open the **Settings** tab in the main window, which shows who to contact.

@@ -1,6 +1,43 @@
 # The first window Start.ps1 shows: a check mark or an X for each system check, a Fix
 # button for what it can fix itself, and, on the first run, the tenant name.
 
+function New-CrMissingResultsForm {
+    <# Asks what to do about results that can't be found. When it closes, its Tag is Retry, New or Stop. #>
+    param([Parameter(Mandatory)] [string] $Folder)
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+    $form = [System.Windows.Forms.Form]@{
+        Text = 'Copilot Readiness'; Font = [System.Drawing.Font]::new('Segoe UI', 10); AutoScaleMode = 'Dpi'; StartPosition = 'CenterScreen'; BackColor = [System.Drawing.Color]::White
+        AutoSize = $true; AutoSizeMode = 'GrowAndShrink'; FormBorderStyle = 'FixedDialog'; MaximizeBox = $false; MinimizeBox = $false; Tag = 'Stop'
+    }
+    $flow = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; FlowDirection = 'TopDown'; WrapContents = $false; Padding = [System.Windows.Forms.Padding]::new(20, 16, 20, 16) }
+    $form.Controls.Add($flow)
+    foreach ($line in @(
+            @("Your past scans can't be found", [System.Drawing.Font]::new('Segoe UI Semibold', 14)),
+            @("They should be in this folder:`n$Folder", $form.Font),
+            @("If it's on a network or USB drive, connect the drive, then press Look again.", $form.Font),
+            @("If you deleted that folder, press Start a new results folder. Past scans in it won't show, and new scans go in this version's folder.", $form.Font))) {
+        $flow.Controls.Add([System.Windows.Forms.Label]@{ Text = $line[0]; Font = $line[1]; AutoSize = $true; UseMnemonic = $false; MaximumSize = [System.Drawing.Size]::new(620, 0); Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 10) })
+    }
+    $row = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; WrapContents = $false; Margin = [System.Windows.Forms.Padding]::new(0, 6, 0, 0) }
+    foreach ($choice in @(@('Look again', 'Retry'), @('Start a new results folder', 'New'), @('Stop', 'Stop'))) {
+        $answer = $choice[1]
+        $button = [System.Windows.Forms.Button]@{ Text = $choice[0]; AutoSize = $true; Padding = [System.Windows.Forms.Padding]::new(8, 2, 8, 2); Margin = [System.Windows.Forms.Padding]::new(0, 0, 10, 0) }
+        if ($answer -eq 'Retry') { Set-CrButtonStyle $button Primary } else { Set-CrButtonStyle $button }
+        $button.Add_Click({ $form.Tag = $answer; $form.Close() }.GetNewClosure())
+        $row.Controls.Add($button)
+    }
+    $flow.Controls.Add($row)
+    $form
+}
+
+function Show-CrMissingResults {
+    <# Shows that question and returns Retry, New or Stop. #>
+    param([Parameter(Mandatory)] [string] $Folder)
+    $form = New-CrMissingResultsForm -Folder $Folder
+    try { [void]$form.ShowDialog(); $form.Tag } finally { $form.Dispose() }
+}
+
 function New-CrCheckForm {
     <#
       Builds the window. GetChecks is called with the tenant name typed so far and returns

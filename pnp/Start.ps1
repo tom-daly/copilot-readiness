@@ -94,10 +94,41 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 $env:PNPPOWERSHELL_UPDATECHECK = 'Off'
 
 Import-Module (Join-Path $PSScriptRoot 'CopilotReadiness\CopilotReadiness.psm1') -Force
+# Before settings are read, which needs this version. The check above is for versions too old to load the module.
+if ([version]"$($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)" -lt (Get-CrPowerShellMinimum)) {
+    throw "This needs PowerShell $(Get-CrPowerShellMinimum) or later (you have $($PSVersionTable.PSVersion)). Install it from https://aka.ms/powershell, then double-click Start.cmd."
+}
+# A newer version in a new folder: use the app and certificate this PC already has, not a new setup.
+# Only for this copy's own settings: a run with a settings file of its own neither takes nor changes what's remembered.
+$ownSettings = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SettingsPath) -eq [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'settings.json'))
+$restoreProblem = $null
+$restored = if ($ownSettings -and -not $RunScan -and -not $RunFix) { try { Restore-CrRememberedSetup -SettingsPath $SettingsPath } catch { $restoreProblem = $_.Exception.Message } }
 $settings = Read-CrSettings $SettingsPath
+$headless = $NoWindow -or $Level -or $Resume -or -not $IsWindows
+# Results carried over from an older copy's folder that can't be found: it may be deleted, or only unplugged,
+# so ask rather than guess, and don't quietly make the folder again.
+$resultsGone = $null
+$resultsNotSaved = $null
+if (-not $RunScan -and -not $RunFix) {
+    # A share that isn't answering can take a while to say so.
+    $carried = Get-CrCarriedResults -Settings $settings
+    if ($carried) { Write-Host "Looking for your results in $carried..." }
+    while ($missing = Get-CrMissingResults -Settings $settings) {
+        if ($headless) { throw "Your results folder, $missing, can't be found. If it's on a network or USB drive, connect it and start again. Otherwise change scan.resultsFolder in settings.json." }
+        $answer = Show-CrMissingResults -Folder $missing
+        if ($answer -eq 'Stop') { Write-Host 'Stopped before starting.'; return }
+        if ($answer -eq 'New') {
+            Set-CrOwnResults -Settings $settings
+            $resultsGone = $missing
+            try { Save-CrSettings $SettingsPath $settings } catch { $resultsNotSaved = $_.Exception.Message }
+        }
+    }
+}
 $resultsFolder = $settings.scan.resultsFolder
 if (-not [IO.Path]::IsPathRooted($resultsFolder)) { $resultsFolder = Join-Path $PSScriptRoot $resultsFolder }
-$headless = $NoWindow -or $Level -or $Resume -or -not $IsWindows
+# Choosing a new results folder is remembered now, not later: setup or signing in may yet stop this run. Not with
+# no app yet, though, which to the remembered setup means the app was removed; it's remembered once setup is done.
+if ($resultsGone -and $ownSettings -and $settings.app.clientId) { try { Save-CrRememberedSetup -Settings $settings -ResultsFolder $resultsFolder -TakeOver } catch { } }
 
 # ── A scan in the background: the progress window starts this in a hidden window ──
 
@@ -231,6 +262,12 @@ trap {
     break
 }
 
+if ($restoreProblem) { Write-Host "Couldn't use the setup this computer remembers from an earlier version ($restoreProblem), so this starts as a new setup." -ForegroundColor Yellow }
+if ($restored -and $restored.Ready -and -not $Setup -and (-not $Tenant -or (ConvertTo-CrTenantName $Tenant) -eq $restored.Tenant)) { Write-Host "Using the app and certificate already set up on this computer for $($restored.Tenant), so there's nothing to set up again." -ForegroundColor Cyan }
+if ($resultsNotSaved) { Write-Host "This choice couldn't be saved in settings.json ($resultsNotSaved), so it asks again next time. Close anything that has the file open, such as OneDrive syncing." -ForegroundColor Yellow }
+if ($resultsGone) { Write-Host "New results go in $resultsFolder. Past scans in $resultsGone won't show." -ForegroundColor Yellow }
+elseif ($restored) { Write-Host "Your results stay in $resultsFolder. Keep that folder." -ForegroundColor Cyan }
+
 Import-Module PnP.PowerShell -MinimumVersion (Get-CrPnPRequired)
 
 # ── Setup: the tenant ───────────────────────────────────────────────────────
@@ -261,6 +298,10 @@ if ($running) {
 
 $app = $settings.app
 $newApp = $Setup -or -not $app.clientId -or -not $app.thumbprint
+# What setup did, for the sign-in below: added a new certificate, used one again, or still needs the permissions accepted.
+$addingComputer = $false
+$reused = $null
+$acceptAt = $null
 
 if (-not $newApp -and -not (Test-Path -LiteralPath "Cert:\CurrentUser\My\$($app.thumbprint)")) {
     throw ("The certificate for '$($app.name)' isn't on this PC. Either copy it here (export it from the PC where setup ran, " +
@@ -304,15 +345,21 @@ if ($newApp) {
         }
 
         if ($alreadyThere) {
-            # Set up before on another PC: this PC joins that app, with the certificate PnP has just made here.
-            Write-Host "Copilot Readiness is already registered in this tenant, but this computer doesn't have a certificate for it yet. Creating one now." -ForegroundColor Cyan
-            Write-Host 'A browser window will ask you to sign in as a Global Administrator once more, so the new certificate can be added.'
+            # Set up before: this PC joins that app, with a certificate it already has on the app if it can,
+            # or the one PnP has just made here. An unused new one goes when setup tidies up.
+            Write-Host "Copilot Readiness is already registered in this tenant. Checking this computer's certificate for it." -ForegroundColor Cyan
+            Write-Host 'A browser window will ask you to sign in as a Global Administrator once more.'
             $certificate = @(Get-CrAppCertificates $app.name | Where-Object { $certificatesBefore -notcontains $_.Thumbprint } | Sort-Object NotBefore -Descending) | Select-Object -First 1
-            if (-not $certificate) { throw "The certificate for this PC wasn't made, so it can't be added to '$($app.name)'. Start again." }
             $graph = New-CrAdminGraph -Settings $settings -DeviceLogin:$DeviceLogin
-            $joined = Add-CrCertificateToApp -Graph $graph -AppName $app.name -Certificate $certificate -Replace $previous
-            Write-Host "Certificate added. This computer now uses the app with ID $($joined.AppId)."
-            $addingComputer = $true
+            # Running setup again on purpose ($previous) still gives this PC a new certificate.
+            if (-not $previous) {
+                $reused = Get-CrReusableCertificate -Graph $graph -AppName $app.name -Certificates @(Get-CrAppCertificates $app.name | Where-Object { $certificatesBefore -contains $_.Thumbprint })
+            }
+            if ($reused) { $certificate = $reused }
+            if (-not $certificate) { throw "The certificate for this PC wasn't made, so it can't be added to '$($app.name)'. Start again." }
+            $joined = Add-CrCertificateToApp -Graph $graph -AppName $app.name -Certificate $certificate -Replace $previous -KeepOnFailure:([bool]$reused)
+            Write-Host "$(if ($reused) { 'Using the certificate this computer already has.' } else { 'Certificate added.' }) This computer now uses the app with ID $($joined.AppId)."
+            if (-not $reused) { $addingComputer = $true }
             $app.clientId = $joined.AppId
             $app.thumbprint = $certificate.Thumbprint
             if ($joined.Accepted -eq $false) {
@@ -330,7 +377,9 @@ if ($newApp) {
             if (-not $app.clientId -or -not $app.thumbprint) { throw "The app was created but its id or certificate thumbprint couldn't be read from: $($created | Out-String)" }
         }
         $keep = $app.thumbprint
-        $app.createdAt = [DateTimeOffset]::UtcNow.ToString('o')
+        # A certificate used again isn't new, so signing in with it isn't given the time a new one gets,
+        # unless the app's permissions have only just been accepted.
+        if (-not $reused -or $acceptAt) { $app.createdAt = [DateTimeOffset]::UtcNow.ToString('o') }
         Save-CrSettings $SettingsPath $settings
         if ($previous -and $joined -and $previous -ne $keep) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$previous" -DeleteKey -Force -ErrorAction SilentlyContinue }
     }
@@ -338,7 +387,7 @@ if ($newApp) {
         # This PC's copy of the certificate is about to go, so don't leave its entry on the app.
         $wasKept = $keep
         $keep = $null
-        if ($joined -and $graph -and $certificate) {
+        if ($joined -and $graph -and $certificate -and -not $reused) {
             try { Remove-CrCertificateFromApp -Graph $graph -ObjectId $joined.ObjectId -Thumbprint $certificate.Thumbprint } catch { }
         }
         if ($wasKept) { $app.thumbprint = $previous }
@@ -350,6 +399,10 @@ if ($newApp) {
     }
 }
 
+# So a newer version, unzipped to a new folder, can carry on from here. Failing to save this stops nothing.
+try { if ($ownSettings) { Save-CrRememberedSetup -Settings $settings -ResultsFolder $resultsFolder -TakeOver:([bool]$resultsGone) } }
+catch { Write-Host "Couldn't remember this setup for the next version: $($_.Exception.Message)" }
+
 # ── Sign in. A new app's permissions can take a few minutes to reach SharePoint. ──
 
 # A young app (made in the last two hours) keeps trying for up to 20 minutes; Microsoft
@@ -358,14 +411,16 @@ Write-Host "Signing in to $($settings.sharePointUrl)..."
 $created = [DateTimeOffset]::MinValue
 $young = $newApp -or ([DateTimeOffset]::TryParse("$($app.createdAt)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$created) -and
     $created -gt [DateTimeOffset]::UtcNow.AddHours(-2))
-$addingComputer = Test-Path variable:addingComputer
+# A certificate Microsoft already accepts has nothing to wait for, unless the app's permissions have only just been accepted.
+$reusing = [bool]$reused -and -not $acceptAt
 # Microsoft's servers don't all accept something new at the same moment, so one good sign-in
 # doesn't mean it's ready. After a new setup, several in a row have to work.
-$needed = if ($newApp) { 3 } else { 1 }
+$needed = if ($newApp -and -not $reusing) { 3 } else { 1 }
 $good = 0
 $waitSince = $null
 $told = $false
-$giveUpAt = [DateTime]::UtcNow.AddMinutes($(if ($young) { 20 } else { 0 }))
+$patience = if ($reusing) { 3 } elseif ($young) { 20 } else { 0 }
+$giveUpAt = [DateTime]::UtcNow.AddMinutes($patience)
 # This screen does its own waiting and counting down. Each pass below is one quick try.
 Set-CrCertificateWait $false
 while ($true) {
@@ -382,7 +437,7 @@ while ($true) {
         $pause = 30
         if ([DateTime]::UtcNow -ge $giveUpAt) {
             if ($young) {
-                throw ("The app is set up and saved, but after 20 minutes Microsoft still won't let it read your sites. Check the permissions were accepted " +
+                throw ("The app is set up and saved, but after $patience minutes Microsoft still won't let it read your sites. Check the permissions were accepted " +
                     "(Entra admin center > App registrations > '$($app.name)' > API permissions: each should say 'Granted'), then start again. " +
                     "The last error was: $($_.Exception.Message)")
             }
@@ -392,12 +447,14 @@ while ($true) {
     }
     # Normal for a new app or certificate: say so in plain words. The technical error stays in the log.
     if (-not $waitSince) { $waitSince = [DateTime]::UtcNow }
-    $mustAccept = (Test-Path variable:acceptAt) -and -not $good
+    $mustAccept = $acceptAt -and -not $good
     $headline = if ($mustAccept) { 'Please press Accept in your browser.' }
+    elseif ($reusing) { "Checking this computer's certificate." }
     elseif ($addingComputer) { if ($good) { 'Almost done. Checking the new certificate works.' } else { "Adding this computer's new certificate." } }
     elseif ($good) { "Almost done. Microsoft is finishing switching on the app's permissions." }
     else { "Nothing is wrong. Microsoft is switching on the app's permissions." }
     $why = if ($mustAccept) { "A Global Administrator needs to accept this app's permissions. If you don't see the page, check your other browser windows; its address is in the box below. This keeps checking by itself, for up to 20 minutes." }
+    elseif ($reusing) { "Copilot Readiness is already registered in this tenant, and this computer already has its certificate. This usually only takes a moment. You don't need to do anything, and this keeps trying by itself." }
     elseif ($addingComputer) { "Copilot Readiness is already registered in this tenant, but this computer didn't have a certificate for it, so one was created. Microsoft takes a few minutes to start accepting it, and sometimes up to 20. You don't need to do anything." }
     else { "This is normal. It usually takes a few minutes and can take up to 20. You don't need to do anything, and this keeps trying by itself." }
     if ($script:activity) {
@@ -418,7 +475,15 @@ if ($newApp) { Write-Host 'Setup done. This PC is ready to scan.' -ForegroundCol
 $choice = $null
 if ($Resume) {
     $unfinished = Get-CrUnfinishedScan $resultsFolder -Tenant $settings.tenant
-    if (-not $unfinished) { throw "There is no unfinished scan of $($settings.tenant) in $resultsFolder to continue." }
+    $otherRules = @(Get-CrPastScans $resultsFolder -Tenant $settings.tenant | Where-Object State -In 'OlderRules', 'NewerRules')
+    if (-not $unfinished) {
+        # One that can't be continued here says why, not that there's none.
+        if ($otherRules) { throw $otherRules[0].RulesNote }
+        throw "There is no unfinished scan of $($settings.tenant) in $resultsFolder to continue."
+    }
+    # A later one that can't be continued is skipped, so say which this is.
+    $skipped = @($otherRules | Where-Object Folder -GT $unfinished.Folder) | Select-Object -First 1
+    if ($skipped) { Write-Warning "Continuing the scan $(Split-Path $unfinished.Folder -Leaf), not a later one, $(Split-Path $skipped.Folder -Leaf): $($skipped.RulesNote)" }
     $folder = $unfinished.Folder
 }
 else {
@@ -457,6 +522,7 @@ else {
 # With the window this is a loop: the progress window's Main window button comes back to the main
 # window, with the past scans read again. Without the window the scan runs once.
 $startTab = $null
+$startGroup = $null
 :window while ($true) {
     if (-not $headless) {
         # A scan running in the background is listed under Past scans, where it can be watched; only a stopped one is offered to continue.
@@ -471,8 +537,9 @@ $startTab = $null
         }
         $choice = Show-CrControlWindow -Sites $all -TenantName $settings.tenant -SharePointUrl $settings.sharePointUrl -Unfinished $unfinished `
             -PastScans @(Get-CrPastScans $resultsFolder -Tenant $settings.tenant) -DefaultLevel $settings.scan.level -DefaultInclude $include -DefaultSites $wanted -DefaultPace $(if ($Pace) { $Pace } else { $settings.scan.pace }) -About (Get-CrAbout $settings $resultsFolder) -TenantSettings $tenantRead.View `
-            -TenantSettingsRead $tenantRead -Remediation $remediation -StartTab $startTab
+            -TenantSettingsRead $tenantRead -Remediation $remediation -StartTab $startTab -StartGroup $startGroup
         $startTab = $null
+        $startGroup = $null
     }
 
     switch ($choice.Action) {
@@ -483,6 +550,7 @@ $startTab = $null
             $teamsKnown = try { Add-CrTeamsKinds $all (Get-CrTeamsMarks -Settings $settings -ResultsRoot $resultsFolder -Refresh); $true }
             catch { Write-Host "Couldn't tell which sites belong to Teams: $($_.Exception.Message)"; $false }
             $startTab = 'Tenant'
+            $startGroup = $choice.Group
             continue window
         }
         'Uninstall' {
@@ -509,6 +577,8 @@ $startTab = $null
                 if ($removal.CertificateProblem) { $left += "This computer's certificate for it couldn't be deleted ($($removal.CertificateProblem)). Delete it by hand: certificate thumbprint $thumbprint in your personal certificates (certmgr.msc)." }
                 try { Save-CrSettings $SettingsPath $settings }
                 catch { $left += "settings.json couldn't be saved ($($_.Exception.Message)), so it still names the deleted app. Close anything that has it open, such as OneDrive syncing, then run setup again; or clear the app's clientId and thumbprint in settings.json by hand." }
+                try { if ($ownSettings) { Save-CrRememberedSetup -Settings $settings -ResultsFolder $resultsFolder } }
+                catch { $left += "The setup this computer remembers for newer versions couldn't be updated ($($_.Exception.Message)), so a newer version may still list $tenantName. Delete $(Get-CrRememberedSetupPath) by hand." }
                 try { Disconnect-PnPOnline } catch { }
                 $done = if ($removal.Deleted) { "Copilot Readiness has been removed from $tenantName." } else { "The app was already gone from $tenantName." }
                 $done += if ($left.Count) { "`n`nBut this computer couldn't finish tidying up:`n  - $($left -join "`n  - ")" } else { " This computer's certificate for it is deleted." }
@@ -539,7 +609,7 @@ $startTab = $null
     Write-Host ''
     $odScope = @($scope.sites | Where-Object kind -EQ 'OneDrive').Count
     $spScope = @($scope.sites).Count - $odScope
-    Write-Host ("Scanning {0}. Results: $folder" -f (@($(if ($spScope) { "$spScope SharePoint $(if ($spScope -eq 1) { 'site' } else { 'sites' }) ($($scope.level))" }), $(if ($odScope) { "$odScope $(if ($odScope -eq 1) { 'OneDrive' } else { 'OneDrives' })" })) -join ' and ')) -ForegroundColor Cyan
+    Write-Host ("Scanning {0}. Results: $folder" -f ((@($(if ($spScope) { "$spScope SharePoint $(if ($spScope -eq 1) { 'site' } else { 'sites' }) ($($scope.level))" }), $(if ($odScope) { "$odScope $(if ($odScope -eq 1) { 'OneDrive' } else { 'OneDrives' })" })) | Where-Object { $_ }) -join ' and ')) -ForegroundColor Cyan
 
     # With the window, the scan runs in the background and the progress window follows it.
     if (-not $headless) {

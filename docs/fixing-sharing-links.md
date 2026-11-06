@@ -23,6 +23,8 @@ This is the only part of Copilot Readiness that changes anything in your Microso
 
 **Which sites**: tick the sites and OneDrives to clean up. The boxes above the list show or hide **SharePoint** sites, **Teams**, **Channels** (private and shared channels, which have sites of their own) and **OneDrive**. Search finds a site by name or address.
 
+Only ticked sites are previewed, but a ticked site counts even when it isn't in the list. So you can't hide a kind of site while any of its sites are ticked: it warns you, and you untick them first or press **Clear**. If a search, or the list's limit of 2,000 sites, leaves ticked sites out of the list, the count under the list says how many. A Team's **General** channel keeps its files in the Team's own site, so previewing a Team includes it.
+
 Access given straight to a person, and the access owners and members have, is never touched. Only sharing links are.
 
 ## Preview

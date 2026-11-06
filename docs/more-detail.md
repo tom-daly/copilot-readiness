@@ -31,7 +31,7 @@ The first run writes this file. You can change it with any text editor:
 - **scan.include**: what the window starts on, and what's scanned without the window: `SharePoint`, `OneDrive` or `Both`.
 - **scan.sites**: site addresses to start with checked. Leave it empty for every site.
 - **scan.staleDays**: how long without changes before a site counts as inactive.
-- **scan.resultsFolder**: where results go.
+- **scan.resultsFolder**: where results go. A newer version fills this in with the full path to your earlier results, so it keeps using them.
 - **scan.pace**: the pace the window starts on, and the one used without the window: `Gentle`, `Normal` or `Fast`. Each scan keeps the pace it started with, including when you continue it. A site is only given up on after 20 minutes of being told to wait, and Continue tries it again.
 
 ## What it doesn't cover yet
@@ -45,10 +45,10 @@ The first run writes this file. You can change it with any text editor:
 
 The **Settings** tab has a button for this: **Remove Copilot Readiness from this tenant**. A Global Administrator signs in, and it deletes the app from the tenant and this PC's certificate for it. Everyone using it, on any PC, loses access straight away, and it has to be set up again to be used again. Entra keeps a deleted app for 30 days, so an admin can bring it back from App registrations > Deleted applications in that time. Past scans on the PC are kept.
 
-Do this in each tenant you set up (sign out to switch tenants). Then, on each other PC that used it, delete its certificate: run `certmgr.msc`, open Personal > Certificates, and remove the ones issued to **Copilot Readiness Scanner (PnP)**. Finally, delete this folder.
+Do this in each tenant you set up (sign out to switch tenants). Then, on each other PC that used it, delete its certificate: run `certmgr.msc`, open Personal > Certificates, and remove the ones issued to **Copilot Readiness Scanner (PnP)**. Finally, delete this folder, any older copies of it, and `%LOCALAPPDATA%\CopilotReadiness` on each PC, where each PC remembers its setup for newer versions. Your past scans may be in an older copy's `results` folder, so copy out anything you want to keep first.
 
 To do it by hand instead:
 
 1. Delete the **Copilot Readiness Scanner (PnP)** app in the Entra admin center under App registrations, in each tenant you set up.
 2. On each PC you used, delete its certificate as above.
-3. Delete this folder.
+3. Delete this folder, any older copies of it, and `%LOCALAPPDATA%\CopilotReadiness`, where each PC remembers its setup for newer versions.

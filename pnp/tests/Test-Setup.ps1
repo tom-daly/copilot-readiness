@@ -55,6 +55,20 @@ function New-App([string] $AppId = 'app-1', [object[]] $Keys = @($firstPc)) {
     [pscustomobject]@{ id = "obj-$AppId"; appId = $AppId; displayName = 'Scanner'; keyCredentials = @($Keys) }
 }
 
+# A certificate this PC already has on the app is used again, not a new one.
+$later = [DateTime]::Now.AddDays(300)
+$soon = [DateTime]::Now.AddDays(5)
+$mine = [pscustomobject]@{ Thumbprint = 'AAAA'; HasPrivateKey = $true; NotAfter = $later }
+$t = New-Tenant -Apps @(New-App)
+Check 'a certificate already on the app is used again' ((Get-CrReusableCertificate -Graph $t.Graph -AppName 'Scanner' -Certificates @($mine)).Thumbprint -eq 'AAAA')
+Check 'looking writes nothing' ($t.State.Writes.Count -eq 0)
+Check 'a certificate not on this app is not used' ($null -eq (Get-CrReusableCertificate -Graph $t.Graph -AppName 'Scanner' -Certificates @([pscustomobject]@{ Thumbprint = 'BBBB'; HasPrivateKey = $true; NotAfter = $later })))
+Check 'nor one without its private key' ($null -eq (Get-CrReusableCertificate -Graph $t.Graph -AppName 'Scanner' -Certificates @([pscustomobject]@{ Thumbprint = 'AAAA'; HasPrivateKey = $false; NotAfter = $later })))
+Check 'nor one about to run out' ($null -eq (Get-CrReusableCertificate -Graph $t.Graph -AppName 'Scanner' -Certificates @([pscustomobject]@{ Thumbprint = 'AAAA'; HasPrivateKey = $true; NotAfter = $soon })))
+Check 'no certificates here: nothing to ask' ($null -eq (Get-CrReusableCertificate -Graph { throw 'asked' } -AppName 'Scanner' -Certificates @()))
+$t = New-Tenant -Apps @((New-App), (New-App 'app-2'))
+Check 'two apps of that name: left for adding to explain' ($null -eq (Get-CrReusableCertificate -Graph $t.Graph -AppName 'Scanner' -Certificates @($mine)))
+
 # The list sent back keeps every certificate.
 $merged = Merge-CrKeyCredentials -Existing @($firstPc) -Certificate $certificate
 Check 'the list keeps the first PC and adds this one' ($merged.Count -eq 2 -and $merged[0].key -eq 'first-pc-key' -and $merged[0].keyId -eq 'k1' -and $merged[1].key -eq [Convert]::ToBase64String($certificate.RawData))
@@ -108,6 +122,36 @@ $t = New-Tenant -Apps @(New-App) -KeepOnly
 $why = Fails { Add-CrCertificateToApp -Sleep $noPause -Checks 3 -Graph $t.Graph -AppName 'Scanner' -Certificate $certificate }
 $ids = @($t.State.Apps[0].keyCredentials | ForEach-Object { "$($_.customKeyIdentifier)" })
 Check "an update that never takes is reported and leaves no entry (got $why / $($ids -join ', '))" ($why -like "*Couldn't confirm*" -and $ids -notcontains $certificate.Thumbprint -and $ids -contains 'AAAA')
+
+# Failing partway: a new certificate comes off the app, one this PC was already using stays.
+function New-FlakyGraph {
+    <# The app's list at first leaves this PC's certificate out, as Microsoft can just after a change, and the check after the update fails. #>
+    $flaky = @{ Keys = @($firstPc); Reads = 0 }
+    $graph = {
+        param($Method, $Path, $Body)
+        if ($Method -eq 'PATCH') {
+            $flaky.Keys = @($Body.keyCredentials | ForEach-Object {
+                    $k = $_ | Select-Object *
+                    if (-not $k.PSObject.Properties['customKeyIdentifier']) { $k | Add-Member customKeyIdentifier $certificate.Thumbprint }
+                    $k
+                })
+            return
+        }
+        if ($Path -like 'applications/*') {
+            $flaky.Reads++
+            if ($flaky.Reads -eq 2) { throw 'service unavailable' }
+            return [pscustomobject]@{ keyCredentials = $flaky.Keys }
+        }
+        [pscustomobject]@{ value = @([pscustomobject]@{ id = 'obj-app-1'; appId = 'app-1'; displayName = 'Scanner' }) }
+    }.GetNewClosure()
+    [pscustomobject]@{ Graph = $graph; State = $flaky }
+}
+$f = New-FlakyGraph
+$why = Fails { Add-CrCertificateToApp -Sleep $noPause -Graph $f.Graph -AppName 'Scanner' -Certificate $certificate }
+Check "a new certificate comes off the app if adding it fails (got $why)" ($why -like '*unavailable*' -and @($f.State.Keys.customKeyIdentifier) -notcontains $certificate.Thumbprint -and @($f.State.Keys.customKeyIdentifier) -contains 'AAAA')
+$f = New-FlakyGraph
+$why = Fails { Add-CrCertificateToApp -Sleep $noPause -Graph $f.Graph -AppName 'Scanner' -Certificate $certificate -KeepOnFailure }
+Check "a certificate already in use stays on the app if it fails (got $why)" ($why -like '*unavailable*' -and @($f.State.Keys.customKeyIdentifier) -contains $certificate.Thumbprint -and @($f.State.Keys.customKeyIdentifier) -contains 'AAAA')
 
 # Taking a certificate back off leaves the others.
 $t = New-Tenant -Apps @(New-App -Keys @($firstPc, $oldHere))

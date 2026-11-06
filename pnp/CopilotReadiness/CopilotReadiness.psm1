@@ -4,9 +4,10 @@
 # Graph; Scan.ps1 walks the tenant; Report.ps1 writes the results; CheckWindow.ps1
 # shows the system check; ControlWindow.ps1 is the window that starts a scan;
 # ProgressWindow.ps1 shows a scan running in the background; ActivityWindow.ps1 shows
-# what the script prints while it sets up and signs in. Setup.ps1 adds a second PC to the tenant's app.
+# what the script prints while it sets up and signs in. Setup.ps1 adds a second PC to the tenant's app, or removes the app.
+# Remediation.ps1 holds the fixes (removing sharing links); RemediationTab.ps1 is their tab in the window.
 
-foreach ($part in 'Rules', 'Settings', 'SystemCheck', 'TenantSettings', 'Http', 'Setup', 'Scan', 'Report', 'CheckWindow', 'ControlWindow', 'ProgressWindow', 'ActivityWindow') {
+foreach ($part in 'Rules', 'Settings', 'SystemCheck', 'TenantSettings', 'Http', 'Setup', 'Scan', 'Remediation', 'Report', 'CheckWindow', 'ControlWindow', 'RemediationTab', 'ProgressWindow', 'ActivityWindow') {
     $file = Join-Path $PSScriptRoot "$part.ps1"
     if (Test-Path -LiteralPath $file) { . $file }
 }

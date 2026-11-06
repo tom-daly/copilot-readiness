@@ -293,14 +293,29 @@ function Get-CrStatus {
 }
 
 function Invoke-CrGet {
-    <# One GET. Returns the parsed JSON; throws with Data.Status set when the answer is an error. #>
+    <#
+      One request: a GET, unless Method says otherwise, with Body sent as JSON. Only the
+      Remediation tab's fixes send anything else; the scan only reads. ExtraHeaders are sent
+      too (such as the Prefer header Graph's change lists need). Returns the parsed JSON;
+      throws with Data.Status set when the answer is an error.
+    #>
     param(
         [Parameter(Mandatory)] [string] $Url,
-        [switch] $AdvancedQuery
+        [switch] $AdvancedQuery,
+        [ValidateSet('GET', 'POST')] [string] $Method = 'GET',
+        $Body,
+        # Not called Headers: PowerShell ignores case, so that would be the same variable as $headers below.
+        [hashtable] $ExtraHeaders = @{}
     )
     $isGraph = $Url.StartsWith('https://graph.microsoft.com/', [StringComparison]::OrdinalIgnoreCase)
     $delay = 2
     $giveUpAt = (Get-CrUtcNow).AddMinutes($script:ThrottlePatienceMinutes)
+    $send = @{}
+    if ($Method -ne 'GET') {
+        $send.Method = $Method
+        $send.Body = if ($null -eq $Body) { '{}' } else { ConvertTo-Json -InputObject $Body -Depth 10 -Compress }
+        $send.ContentType = if ($isGraph) { 'application/json' } else { 'application/json;odata=nometadata' }
+    }
 
     for ($attempt = 1; ; $attempt++) {
         Wait-CrThrottle
@@ -309,9 +324,10 @@ function Invoke-CrGet {
             Accept        = if ($isGraph) { 'application/json' } else { 'application/json;odata=nometadata' }
         }
         if ($AdvancedQuery) { $headers.ConsistencyLevel = 'eventual' }
+        foreach ($name in $ExtraHeaders.Keys) { $headers[$name] = $ExtraHeaders[$name] }
 
         try {
-            $resp = Invoke-WebRequest -Uri $Url -Headers $headers -UserAgent $script:UserAgent -SkipHttpErrorCheck -ErrorAction Stop
+            $resp = Invoke-WebRequest -Uri $Url -Headers $headers -UserAgent $script:UserAgent -SkipHttpErrorCheck -ErrorAction Stop @send
         }
         catch {
             # Network trouble rather than an answer: retry a few times, then give up.
@@ -350,6 +366,12 @@ function Invoke-CrGet {
         $ex.Data['Status'] = $status
         throw $ex
     }
+}
+
+function Invoke-CrPost {
+    <# One POST to SharePoint with a JSON body. #>
+    param([Parameter(Mandatory)] [string] $Url, $Body)
+    Invoke-CrGet -Url $Url -Method POST -Body $Body
 }
 
 function Get-CrPage {

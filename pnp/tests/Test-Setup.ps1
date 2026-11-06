@@ -185,6 +185,33 @@ try {
 }
 finally { Remove-Item $folder -Recurse -Force }
 
+# Removing the app: the tenant's app is deleted, then only this tenant's settings are forgotten.
+$calls = [System.Collections.Generic.List[string]]::new()
+$fakeGraph = {
+    param([string] $Method, [string] $Path, $Body)
+    $calls.Add("$Method $Path")
+    if ($Method -eq 'GET' -and $Path -like 'applications?*') { return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'obj-1'; appId = '11111111-2222-3333-4444-555555555555' }) } }
+}.GetNewClosure()
+$removing = [pscustomobject]@{
+    tenant = 'contoso.onmicrosoft.com'
+    app    = [pscustomobject]@{ name = 'Copilot Readiness Scanner (PnP)'; clientId = '11111111-2222-3333-4444-555555555555'; thumbprint = 'NOT-ON-THIS-PC'; createdAt = '2026-01-01' }
+    otherTenants = @([pscustomobject]@{ tenant = 'fabrikam.onmicrosoft.com'; clientId = 'other'; thumbprint = 'OTHER' })
+}
+$deleted = Uninstall-CrApp -Settings $removing -Graph $fakeGraph
+Check "the app is found by its ID and deleted (calls: $($calls -join ' | '))" ($deleted -eq 1 -and $calls[0] -like "GET applications?`$filter=appId eq '11111111-2222-3333-4444-555555555555'*" -and $calls[1] -eq 'DELETE applications/obj-1')
+Check 'settings forget the app, other tenants kept' (-not $removing.app.clientId -and -not $removing.app.thumbprint -and $removing.otherTenants[0].clientId -eq 'other')
+$calls.Clear()
+$failing = { param($Method, $Path, $Body) if ($Method -eq 'DELETE') { throw 'Forbidden' }; [pscustomobject]@{ value = @([pscustomobject]@{ id = 'obj-1' }) } }
+$keep = [pscustomobject]@{ tenant = 'contoso.onmicrosoft.com'; app = [pscustomobject]@{ clientId = '11111111-2222-3333-4444-555555555555'; thumbprint = 'T'; createdAt = '' } }
+$threw = try { $null = Uninstall-CrApp -Settings $keep -Graph $failing; $false } catch { $true }
+Check 'when the tenant refuses, this PC keeps the app' ($threw -and $keep.app.clientId -and $keep.app.thumbprint -eq 'T')
+
+# The tenant's settings read back from the saved copy look the same as when first read.
+$values = [ordered]@{ SharingCapability = [Microsoft.PowerShell.ExecutionPolicy]::Bypass; OneDriveSharingCapability = 'Disabled'; RequireAnonymousLinksExpireInDays = 30; ShowEveryoneClaim = $false; AllowedDomainList = @('a.com', 'b.com') }
+$plain = ConvertTo-CrPlainSettings $values
+$back = (ConvertTo-Json -InputObject ([pscustomobject]$plain) -Depth 5 | ConvertFrom-Json)
+Check 'choices are kept as names, lists as lists' ($back.SharingCapability -eq 'Bypass' -and $back.RequireAnonymousLinksExpireInDays -eq 30 -and @($back.AllowedDomainList).Count -eq 2 -and $back.ShowEveryoneClaim -eq $false)
+
 if ($problems.Count) {
     Write-Host "$($problems.Count) setup checks failed" -ForegroundColor Red
     $problems | ForEach-Object { Write-Host "  FAIL $_" }

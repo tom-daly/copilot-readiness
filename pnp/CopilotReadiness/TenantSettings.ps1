@@ -28,6 +28,69 @@ function Read-CrTenantSettings {
     $values
 }
 
+function Get-CrTenantSettingsPath {
+    <# Where a tenant's settings are kept once read: a file in the results folder, which the scan lists ignore. #>
+    param([Parameter(Mandatory)] [string] $ResultsRoot, [Parameter(Mandatory)] [string] $Tenant)
+    Join-Path $ResultsRoot ("tenant-settings-{0}.json" -f ($Tenant -replace '[^A-Za-z0-9.-]', '_'))
+}
+
+function ConvertTo-CrPlainSettings {
+    <#
+      The settings as plain text, numbers and true/false, so they read back from a file the same
+      as they came: a choice such as ExternalUserAndGuestSharing is kept as its name, not a number.
+    #>
+    param([Parameter(Mandatory)] [System.Collections.IDictionary] $Values)
+    $plain = [ordered]@{}
+    foreach ($k in $Values.Keys) {
+        $v = $Values[$k]
+        $plain[$k] = if ($null -eq $v) { $null }
+        elseif ($v -is [enum] -or $v -is [guid] -or $v -is [DateTime] -or $v -is [DateTimeOffset]) { "$v" }
+        elseif ($v -is [string] -or $v -is [bool] -or $v -is [ValueType]) { $v }
+        elseif ($v -is [System.Collections.IEnumerable]) { , @($v | ForEach-Object { "$_" }) }
+        else { "$v" }
+    }
+    $plain
+}
+
+function Get-CrSavedTenantSettings {
+    <#
+      The tenant's sharing and Copilot settings for the Tenant tab. They're read from the tenant
+      once and kept in the results folder; after that the saved copy is used, until -Refresh reads
+      them again. Returns View (from Get-CrTenantSettingsView, or why they couldn't be read), ReadAt
+      (when they were read, or nothing) and Problem (why a refresh failed, when the older copy is
+      shown instead).
+    #>
+    param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ResultsRoot, [switch] $Refresh)
+    $path = Get-CrTenantSettingsPath $ResultsRoot $Settings.tenant
+    $saved = $null
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $file = Read-CrJson $path
+            $values = [ordered]@{}
+            foreach ($p in $file.values.PSObject.Properties) { $values[$p.Name] = $p.Value }
+            $saved = [pscustomobject]@{
+                View    = Get-CrTenantSettingsView $values -SharePointUrl $Settings.sharePointUrl
+                ReadAt  = [DateTimeOffset]::Parse($file.readAt, [Globalization.CultureInfo]::InvariantCulture)
+                Problem = $null
+            }
+        }
+        catch { $saved = $null }   # a copy that can't be read is read again from the tenant
+    }
+    if ($saved -and -not $Refresh) { return $saved }
+
+    try {
+        $values = ConvertTo-CrPlainSettings (Read-CrTenantSettings $Settings)
+        $now = [DateTimeOffset]::UtcNow
+        New-Item -ItemType Directory -Path $ResultsRoot -Force | Out-Null
+        Write-CrJson $path ([pscustomobject][ordered]@{ tenant = $Settings.tenant; readAt = $now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); values = [pscustomobject]$values })
+        [pscustomobject]@{ View = Get-CrTenantSettingsView $values -SharePointUrl $Settings.sharePointUrl; ReadAt = $now; Problem = $null }
+    }
+    catch {
+        if ($saved) { $saved.Problem = $_.Exception.Message; return $saved }
+        [pscustomobject]@{ View = $_.Exception.Message; ReadAt = $null; Problem = $null }
+    }
+}
+
 function Get-CrTenantSettingsView {
     <#
       Turns the raw settings into what the Tenant tab shows: groups of rows, each with the

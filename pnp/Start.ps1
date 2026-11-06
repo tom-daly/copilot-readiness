@@ -21,8 +21,12 @@
   another tenant. Each tenant gets its own app the first time; settings.json remembers
   them all, so switching back needs no new setup.
 
-  The app gets these application permissions. All of them are read-only in effect; the
-  scan never changes anything in SharePoint.
+  The Remediation tab fixes what a scan finds, starting with removing sharing links: choose
+  which links, how old and on which sites, Preview to see what would go (nothing changes),
+  then Remove to remove exactly those. It signs in as the same app.
+
+  The app gets these application permissions. The scan only reads with them and never
+  changes anything in SharePoint; only the Remediation tab's Remove button does.
 
     SharePoint  Sites.FullControl.All                 Reading who a site, library or file is shared with
                                                        needs it; Sites.Read.All cannot see permissions.
@@ -73,7 +77,11 @@ param(
     [switch] $DeviceLogin,
     [string] $SettingsPath = (Join-Path $PSScriptRoot 'settings.json'),
     # Used by the window to run a scan folder in the background; not needed by hand.
-    [string] $RunScan
+    [string] $RunScan,
+    # Used by the Remediation tab to run a fix's Preview or Remove step in the background; not needed by hand.
+    [string] $RunFix,
+    [ValidateSet('Preview', 'Remove')] [string] $FixStep = 'Preview',
+    [ValidateSet('Gentle', 'Normal', 'Fast')] [string] $FixPace = 'Normal'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,6 +124,35 @@ if ($RunScan) {
         Write-Host "$(Get-Date -Format s) $($_.Exception.Message)"
         # The scan reports its own problems; this covers ones before it starts, such as signing in.
         if ((Read-CrProgress $RunScan).state -eq 'Starting') { Set-CrProgressState $RunScan Failed $_.Exception.Message }
+        throw
+    }
+    return
+}
+
+# ── A fix in the background: the Remediation tab starts this in a hidden window ──
+
+if ($RunFix) {
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        $fix = Get-Content -LiteralPath (Join-Path $RunFix 'fix.json') -Raw | ConvertFrom-Json
+        Set-CrTenant $settings $fix.tenant
+        Import-Module PnP.PowerShell -MinimumVersion (Get-CrPnPRequired)
+        Write-Host "$(Get-Date -Format s) Signing in to $($settings.sharePointUrl)"
+        Set-CrStopFile (Join-Path $RunFix 'stop.request')
+        try { Connect-CrTenant $settings }
+        catch [System.OperationCanceledException] {
+            Write-CrFixProgress -Folder $RunFix -Step $FixStep -State Cancelled
+            return
+        }
+        # The same limits as a scan at this pace: no more requests a minute than it allows, one site at a time.
+        Set-CrThrottlePace -Throttle (Get-CrThrottle) -Pace (Get-CrPace $FixPace) -Paced -Sites 1
+        Write-Host "$(Get-Date -Format s) $FixStep $RunFix at the $FixPace pace"
+        Invoke-CrFix -Folder $RunFix -Step $FixStep
+        Write-Host "$(Get-Date -Format s) Finished"
+    }
+    catch {
+        Write-Host "$(Get-Date -Format s) $($_.Exception.Message)"
+        Write-CrFixProgress -Folder $RunFix -Step $FixStep -State Failed -ErrorText $_.Exception.Message
         throw
     }
     return
@@ -399,25 +436,64 @@ else {
     }
     else {
         # The Tenant tab's settings; if they can't be read the tab says why and the scan goes ahead.
-        Write-Host 'Reading the tenant''s sharing settings...'
-        $tenantSettings = try { Get-CrTenantSettingsView (Read-CrTenantSettings $settings) -SharePointUrl $settings.sharePointUrl } catch { $_.Exception.Message }
+        # Read from the tenant the first time, then kept; the Tenant tab's Refresh button reads them again.
+        if (-not (Test-Path -LiteralPath (Get-CrTenantSettingsPath $resultsFolder $settings.tenant))) { Write-Host 'Reading the tenant''s sharing settings...' }
+        $tenantRead = Get-CrSavedTenantSettings -Settings $settings -ResultsRoot $resultsFolder
+        # Which sites belong to a Team or a channel, for the Remediation tab's filters. Without it they show as SharePoint sites.
+        $teamsKnown = try { Add-CrTeamsKinds $all $settings; $true } catch { Write-Host "Couldn't tell which sites belong to Teams: $($_.Exception.Message)"; $false }
         & $closeActivity
     }
 }
 
 # With the window this is a loop: the progress window's Main window button comes back to the main
 # window, with the past scans read again. Without the window the scan runs once.
-while ($true) {
+$startTab = $null
+:window while ($true) {
     if (-not $headless) {
         # A scan running in the background is listed under Past scans, where it can be watched; only a stopped one is offered to continue.
         $unfinished = Get-CrUnfinishedScan $resultsFolder -Tenant $settings.tenant
         if ($unfinished -and (Test-CrScanRunning $unfinished.Folder)) { $unfinished = $null }
+        $remediation = @{
+            ResultsRoot = $resultsFolder
+            Tenant      = $settings.tenant
+            TeamsKnown  = [bool]$teamsKnown
+            DefaultPace = $(if ($Pace) { $Pace } else { $settings.scan.pace })
+            Start       = { param($folder, $step, $pace) Start-CrBackgroundFix -Folder $folder -Step $step -StartScript $startScript -SettingsPath $SettingsPath -Pace $pace }.GetNewClosure()
+        }
         $choice = Show-CrControlWindow -Sites $all -TenantName $settings.tenant -SharePointUrl $settings.sharePointUrl -Unfinished $unfinished `
-            -PastScans @(Get-CrPastScans $resultsFolder -Tenant $settings.tenant) -DefaultLevel $settings.scan.level -DefaultInclude $include -DefaultSites $wanted -DefaultPace $(if ($Pace) { $Pace } else { $settings.scan.pace }) -About (Get-CrAbout $settings $resultsFolder) -TenantSettings $tenantSettings
+            -PastScans @(Get-CrPastScans $resultsFolder -Tenant $settings.tenant) -DefaultLevel $settings.scan.level -DefaultInclude $include -DefaultSites $wanted -DefaultPace $(if ($Pace) { $Pace } else { $settings.scan.pace }) -About (Get-CrAbout $settings $resultsFolder) -TenantSettings $tenantRead.View `
+            -TenantSettingsRead $tenantRead -Remediation $remediation -StartTab $startTab
+        $startTab = $null
     }
 
     switch ($choice.Action) {
         'Cancel' { Write-Host 'No scan started.'; return }
+        'RefreshTenant' {
+            Write-Host 'Reading the tenant''s sharing settings again...'
+            $tenantRead = Get-CrSavedTenantSettings -Settings $settings -ResultsRoot $resultsFolder -Refresh
+            $startTab = 'Tenant'
+            continue window
+        }
+        'Uninstall' {
+            # Confirmed in the window already. An admin signs in; if that's cancelled or fails, nothing has changed.
+            Add-Type -AssemblyName System.Windows.Forms
+            $tenantName = $settings.tenant
+            try {
+                Write-Host "Removing Copilot Readiness from $tenantName. A browser window asks a Global Administrator to sign in."
+                $deleted = Uninstall-CrApp -Settings $settings -DeviceLogin:$DeviceLogin
+                Save-CrSettings $SettingsPath $settings
+                try { Disconnect-PnPOnline } catch { }
+                $done = if ($deleted) { "Copilot Readiness has been removed from $tenantName, and this computer's certificate for it is deleted." }
+                else { "The app was already gone from $tenantName. This computer's certificate for it is deleted." }
+                Write-Host $done -ForegroundColor Green
+                [void][System.Windows.Forms.MessageBox]::Show("$done`n`nAn admin can bring the app back from Entra admin center > App registrations > Deleted applications within 30 days. To use Copilot Readiness again, run it and set it up.", 'Copilot Readiness removed', 'OK', 'Information')
+            }
+            catch {
+                Write-Host "Couldn't remove it: $($_.Exception.Message)" -ForegroundColor Red
+                [void][System.Windows.Forms.MessageBox]::Show("Couldn't remove Copilot Readiness from $($tenantName). Nothing was changed on this computer.`n`n$($_.Exception.Message)", 'Copilot Readiness', 'OK', 'Warning')
+            }
+            return
+        }
         'SwitchTenant' {
             # Start again, asking which tenant; this tenant's app stays saved for switching back.
             try { Disconnect-PnPOnline } catch { }

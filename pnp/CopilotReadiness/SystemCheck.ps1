@@ -93,7 +93,8 @@ function Get-CrAbout {
     [pscustomobject][ordered]@{
         Name         = 'Copilot Readiness scan'
         BuiltBy      = 'Thomas Daly'
-        Support      = 'thomas.m.daly@outlook.com'
+        Support      = 'thomasdaly.net'
+        SupportUrl   = 'https://thomasdaly.net'
         RuleBook     = (Get-CrRuleBook).version
         Requirements = @(
             [pscustomobject]@{ Name = 'PowerShell'; Needs = "$script:PowerShellMinimum or later"; Has = "$ps"; Ok = $ps -ge $script:PowerShellMinimum }

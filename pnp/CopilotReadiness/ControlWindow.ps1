@@ -46,7 +46,11 @@ function New-CrControlForm {
       are scanned. DefaultLevel, DefaultInclude and DefaultSites (addresses) are what it
       starts with. PastScans (from Get-CrPastScans) fills the Past scans tab; About (from
       Get-CrAbout) fills the Settings tab. TenantSettings (from Get-CrTenantSettingsView, or the
-      reason they couldn't be read) fills the Tenant tab.
+      reason they couldn't be read) fills the Tenant tab; TenantSettingsRead says when they were
+      read (ReadAt) and why a refresh failed (Problem). Remediation (see Add-CrRemediationTab)
+      adds the Remediation tab. StartTab names the tab to open on.
+      Two more actions close it: 'RefreshTenant' (read the tenant's settings again, then open on
+      the Tenant tab) and 'Uninstall' (remove the app from the tenant and this PC, already confirmed).
     #>
     param(
         [Parameter(Mandatory)] [object[]] $Sites,
@@ -59,7 +63,10 @@ function New-CrControlForm {
         [string[]] $DefaultSites = @(),
         [string] $DefaultPace = 'Normal',
         $About,
-        $TenantSettings
+        $TenantSettings,
+        $TenantSettingsRead,
+        [hashtable] $Remediation,
+        [string] $StartTab
     )
     $spCount = @($Sites | Where-Object kind -NE 'OneDrive').Count
     $odCount = @($Sites | Where-Object kind -EQ 'OneDrive').Count
@@ -167,11 +174,18 @@ function New-CrControlForm {
     $newPage, $newLayout = New-Page 'New scan'
     $pastPage, $pastLayout = New-Page "Past scans ($(@($PastScans).Count))"
     $tabs.TabPages.AddRange(@($newPage, $pastPage))
+    $tenantPage = $null
+    # The Tenant tab's cards. Each is measured once and then keeps its size, because measuring all of
+    # them every time the tab is shown took ten seconds or more; they are measured again when the width changes.
+    $tenantCards = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
     if ($TenantSettings) {
         # This tab can be long, so its content keeps its own height and the page scrolls.
         $tenantPage, $tenantLayout = New-Page 'Tenant'
         $tenantLayout.Dock = 'Top'; $tenantLayout.AutoSize = $true
         $tabs.TabPages.Add($tenantPage)
+    }
+    if ($Remediation) {
+        $null = Add-CrRemediationTab -Form $form -Tabs $tabs -Sites $Sites -Remediation $Remediation -Font $font -Bold $bold -Muted $muted -NewLabel ${function:New-Label}
     }
     if ($About) { $settingsPage, $settingsLayout = New-Page 'Settings'; $tabs.TabPages.Add($settingsPage) }
     $null = Add-Row $tabs 'Fill'
@@ -384,6 +398,21 @@ function New-CrControlForm {
     # Tenant: the sharing and Copilot settings, as cards a non-technical reader can take in at a glance:
     # a verdict in words, the setting, what it is now and what we recommend. Show more opens the rest:
     # why, where to find it, a picture of the screen, and buttons to the guide and the admin center.
+    if ($TenantSettings) {
+        # When the settings were read, and a button to read them again.
+        $readRow = [System.Windows.Forms.FlowLayoutPanel]@{ AutoSize = $true; WrapContents = $false; Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 0) }
+        $readAt = if ($TenantSettingsRead -and $TenantSettingsRead.ReadAt) { $TenantSettingsRead.ReadAt.ToLocalTime().ToString('MMMM d, yyyy, h:mm tt') }
+        $readText = [System.Windows.Forms.Label]@{ Text = $(if ($readAt) { "Read from your tenant on $readAt." } else { 'Not read from your tenant yet.' }); AutoSize = $true; ForeColor = $muted; Margin = [System.Windows.Forms.Padding]::new(0, 7, 12, 0) }
+        $refreshTenant = [System.Windows.Forms.Button]@{ Text = 'Refresh'; AutoSize = $true; Padding = [System.Windows.Forms.Padding]::new(8, 1, 8, 1) }
+        Set-CrButtonStyle $refreshTenant
+        $refreshTenant.Add_Click({ $form.Tag = [pscustomobject]@{ Action = 'RefreshTenant'; Level = $null; Include = $null; Sites = @(); Folder = $null }; $form.Close() }.GetNewClosure())
+        $tips.SetToolTip($refreshTenant, 'Read the settings from your tenant again. The window closes and opens again on this tab.')
+        $readRow.Controls.AddRange(@($readText, $refreshTenant))
+        $null = Add-Row $readRow -to $tenantLayout
+        if ($TenantSettingsRead -and $TenantSettingsRead.Problem) {
+            $null = Add-Row (New-Label "Couldn't read them again just now, so these are from the time above: $($TenantSettingsRead.Problem)" $font ([System.Drawing.Color]::FromArgb(191, 87, 0))) -to $tenantLayout
+        }
+    }
     if ($TenantSettings -is [string]) {
         $null = Add-Row (New-Label "Couldn't read this tenant's settings: $TenantSettings" $font $muted) -to $tenantLayout
     }
@@ -528,9 +557,16 @@ function New-CrControlForm {
                 $more = New-IconButton 'Show more' ([char]0xE70D)
                 $more.Margin = [System.Windows.Forms.Padding]::new(0, 6, 0, 0)
                 $more.Add_Click({
+                        # The card grows or shrinks to fit, then keeps its new size.
+                        $tenantLayout.SuspendLayout()
+                        $card.AutoSize = $true
                         $details.Visible = -not $details.Visible
                         $more.Text = if ($details.Visible) { 'Show less' } else { 'Show more' }
                         $more.Image = if ($details.Visible) { $chevronUp } else { $chevronDown }
+                        $tenantLayout.ResumeLayout($true)
+                        $size = $card.Size
+                        $card.AutoSize = $false
+                        $card.Size = $size
                     }.GetNewClosure())
                 $what.Controls.Add($more)
                 $what.Controls.Add($details)
@@ -538,6 +574,7 @@ function New-CrControlForm {
                 $card.Controls.Add($badge, 0, 0)
                 $card.Controls.Add($what, 1, 0)
                 $null = Add-Row $card -to $tenantLayout
+                $tenantCards.Add($card)
             }
         }
         $tenantLayout.ResumeLayout()
@@ -571,7 +608,7 @@ function New-CrControlForm {
         }
 
         $support = [System.Windows.Forms.LinkLabel]@{ Text = $About.Support; AutoSize = $true; Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 4) }
-        $support.Add_LinkClicked({ Start-Process "mailto:$($About.Support)?subject=Copilot Readiness scan" }.GetNewClosure())
+        $support.Add_LinkClicked({ Start-Process $About.SupportUrl }.GetNewClosure())
         $null = Add-Row (New-Facts 'About' @(
                 , @('App', $About.Name)
                 , @('Built by', $About.BuiltBy)
@@ -602,6 +639,31 @@ function New-CrControlForm {
                 , @('Tenant', $About.Tenant)
                 , @('SharePoint', $About.SharePoint)
             )) -to $settingsLayout
+
+        # Removing Copilot Readiness from the tenant, and this PC's certificate for it.
+        if ($About.AppId) {
+            $removeBox = [System.Windows.Forms.GroupBox]@{ Text = 'Remove from this tenant'; AutoSize = $true; Dock = 'Top'; Padding = [System.Windows.Forms.Padding]::new(12, 8, 12, 8); Margin = [System.Windows.Forms.Padding]::new(0, 4, 0, 8) }
+            $removeStack = [System.Windows.Forms.FlowLayoutPanel]@{ Dock = 'Fill'; AutoSize = $true; FlowDirection = 'TopDown'; WrapContents = $false }
+            $removeNote = New-Label ("Deletes the app from $($About.Tenant) and its certificate from this computer. Everyone using it, on any computer, " +
+                'loses access straight away and would have to set it up again. Past scans on this computer are kept.') $font $muted
+            $removeButton = [System.Windows.Forms.Button]@{ Text = 'Remove Copilot Readiness from this tenant'; AutoSize = $true; Padding = [System.Windows.Forms.Padding]::new(10, 3, 10, 3); Margin = [System.Windows.Forms.Padding]::new(0, 6, 0, 0) }
+            Set-CrButtonStyle $removeButton Danger
+            $removeButton.Add_Click({
+                    $answer = [System.Windows.Forms.MessageBox]::Show($form,
+                        ("This removes Copilot Readiness from $($About.Tenant):`n`n" +
+                        "  - the app ($($About.AppId)) is deleted from your tenant, and its permissions go with it`n" +
+                        "  - this computer's certificate for it is deleted`n`n" +
+                        "Anyone else using it, on any computer, loses access straight away. To use it again, someone has to set it up again from the start.`n`n" +
+                        "A Global Administrator signs in to do this. Past scans on this computer are kept.`n`nRemove it?"),
+                        'Remove Copilot Readiness', 'YesNo', 'Warning', 'Button2')
+                    if ($answer -ne 'Yes') { return }
+                    $form.Tag = [pscustomobject]@{ Action = 'Uninstall'; Level = $null; Include = $null; Sites = @(); Folder = $null }
+                    $form.Close()
+                }.GetNewClosure())
+            $removeStack.Controls.AddRange(@($removeNote, $removeButton))
+            $removeBox.Controls.Add($removeStack)
+            $null = Add-Row $removeBox -to $settingsLayout
+        }
 
         $results = New-ValueWithButton $About.Results 'Open' ({ Start-Process explorer.exe -ArgumentList "`"$($About.Results)`"" }.GetNewClosure())
         $null = Add-Row (New-Facts 'Results' @(, @('Saved in', $results))) -to $settingsLayout
@@ -676,14 +738,20 @@ function New-CrControlForm {
     if (@($Sites | Where-Object { $chosen.Contains($_.url) }).Count) { $someRadio.Checked = $true }
 
     # Most of the screen, so the site list has room; the wrapping text follows the width.
-    $form.Add_Load({ Set-CrScreenShare $form -Width 0.6 -Height 0.88 }.GetNewClosure())
+    # Opens full screen; restoring it gives most of the screen.
+    $form.Add_Load({ Set-CrScreenShare $form -Width 0.6 -Height 0.88; $form.WindowState = 'Maximized' }.GetNewClosure())
+    if ($StartTab) {
+        $open = $tabs.TabPages | Where-Object { $_.Text -like "$StartTab*" } | Select-Object -First 1
+        if ($open) { $tabs.SelectedTab = $open }
+    }
     # The wrapped labels are re-measured to the new width, but only those on the tab that is showing, and only
     # when a resize ends, the window is maximized or restored, or the tab changes. Re-measuring every label on
     # every tab for every pixel of a drag re-laid out every card on the Tenant tab each time and froze the window.
     $pageOf = [System.Collections.Generic.Dictionary[object, object]]::new()
     $reflowed = @{}
     $reflow = {
-        $page = $tabs.SelectedTab
+        param($page)
+        if (-not $page) { $page = $tabs.SelectedTab }
         $widths = @{
             default = [Math]::Max(300, $layout.ClientSize.Width - $layout.Padding.Horizontal - 80)
             half    = [Math]::Max(200, [int]($tabs.ClientSize.Width / 2) - 70)
@@ -705,12 +773,20 @@ function New-CrControlForm {
         }
         $holders = [System.Collections.Generic.HashSet[object]]::new()
         foreach ($l in $todo) { if ($l.Parent) { $null = $holders.Add($l.Parent) } }
+        # The Tenant tab's cards are measured again at the new width, all at once, then keep their size.
+        $isTenant = $tenantPage -and $page -eq $tenantPage
+        if ($isTenant) { $tenantLayout.SuspendLayout(); foreach ($c in $tenantCards) { $c.SuspendLayout(); $c.AutoSize = $true } }
         foreach ($h in $holders) { $h.SuspendLayout() }
         foreach ($l in $todo) {
             $w = switch ($l.Tag) { 'half' { $widths.half } 'rest' { $widths.rest } 'narrow' { $widths.narrow } default { $widths.default } }
             $l.MaximumSize = [System.Drawing.Size]::new($w, 0)
         }
         foreach ($h in $holders) { $h.ResumeLayout($true) }
+        if ($isTenant) {
+            foreach ($c in $tenantCards) { $c.ResumeLayout($false) }
+            $tenantLayout.ResumeLayout($true)
+            foreach ($c in $tenantCards) { $size = $c.Size; $c.AutoSize = $false; $c.Size = $size }
+        }
         & $fit
     }.GetNewClosure()
     $windowState = @{ Last = $form.WindowState }
@@ -719,8 +795,9 @@ function New-CrControlForm {
         }.GetNewClosure())
     $form.Add_ResizeEnd({ & $reflow }.GetNewClosure())
     $tabs.Add_SelectedIndexChanged({ & $reflow }.GetNewClosure())
-    # The panels only settle at their final size once the window is on screen.
-    $form.Add_Shown({ & $reflow }.GetNewClosure())
+    # The panels only settle at their final size once the window is on screen. The Tenant tab is
+    # measured then too, whichever tab is showing, so opening it later is quick.
+    $form.Add_Shown({ & $reflow; if ($tenantPage -and $tabs.SelectedTab -ne $tenantPage) { & $reflow $tenantPage } }.GetNewClosure())
 
     & $refresh
     $form
@@ -850,10 +927,13 @@ function Show-CrControlWindow {
         [string[]] $DefaultSites = @(),
         [string] $DefaultPace = 'Normal',
         $About,
-        $TenantSettings
+        $TenantSettings,
+        $TenantSettingsRead,
+        [hashtable] $Remediation,
+        [string] $StartTab
     )
     $form = New-CrControlForm -Sites $Sites -TenantName $TenantName -SharePointUrl $SharePointUrl -Unfinished $Unfinished -PastScans $PastScans -DefaultLevel $DefaultLevel `
-        -DefaultInclude $DefaultInclude -DefaultSites $DefaultSites -DefaultPace $DefaultPace -About $About -TenantSettings $TenantSettings
+        -DefaultInclude $DefaultInclude -DefaultSites $DefaultSites -DefaultPace $DefaultPace -About $About -TenantSettings $TenantSettings -TenantSettingsRead $TenantSettingsRead -Remediation $Remediation -StartTab $StartTab
     try {
         [void]$form.ShowDialog()
         $form.Tag

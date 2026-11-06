@@ -139,3 +139,44 @@ function Remove-CrSetupLeftovers {
     Get-CrAppCertificates $AppName | Where-Object { $CertificatesBefore -notcontains $_.Thumbprint -and $_.Thumbprint -ne $Keep } |
         ForEach-Object { Remove-Item -LiteralPath $_.PSPath -DeleteKey -Force }
 }
+
+# ── Removing the app ───────────────────────────────────────────────────────
+
+function Remove-CrAppFromTenant {
+    <#
+      Deletes the app with this app ID from the tenant, which also takes away its permissions
+      there. Entra keeps a deleted app for 30 days, so an admin can bring it back from Deleted
+      applications in that time. Returns how many apps were deleted (0 when it was already gone).
+      Graph is what New-CrAdminGraph returns.
+    #>
+    param([Parameter(Mandatory)] [scriptblock] $Graph, [Parameter(Mandatory)] [string] $AppId)
+    $parsed = [guid]::Empty
+    if (-not [guid]::TryParse($AppId, [ref]$parsed)) { throw "'$AppId' isn't an app ID." }
+    $apps = @((& $Graph GET "applications?`$filter=appId eq '$AppId'&`$select=id,appId,displayName").value)
+    foreach ($a in $apps) { $null = & $Graph DELETE "applications/$($a.id)" }
+    $apps.Count
+}
+
+function Uninstall-CrApp {
+    <#
+      Removes Copilot Readiness from the current tenant: an admin signs in, the app is deleted
+      from the tenant, then this PC's certificate for it is deleted and settings.json forgets it
+      (the caller saves). Every PC using the app loses access; setting it up again makes a new one.
+      Other tenants' apps and certificates on this PC are left alone: they share the app's name,
+      so only this tenant's certificate is removed, by its thumbprint. Past results are kept.
+      Returns how many apps were deleted from the tenant.
+    #>
+    param([Parameter(Mandatory)] $Settings, [switch] $DeviceLogin, [scriptblock] $Graph)
+    if (-not $Settings.app.clientId) { throw "There's no app set up for $($Settings.tenant) on this PC." }
+    if (-not $Graph) { $Graph = New-CrAdminGraph -Settings $Settings -DeviceLogin:$DeviceLogin }
+    # The tenant first: if that fails, this PC keeps its certificate and nothing has changed.
+    $deleted = Remove-CrAppFromTenant -Graph $Graph -AppId $Settings.app.clientId
+    $thumbprint = "$($Settings.app.thumbprint)"
+    if ($thumbprint -and (Test-Path -LiteralPath "Cert:\CurrentUser\My\$thumbprint")) {
+        Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey -Force
+    }
+    $Settings.app.clientId = ''
+    $Settings.app.thumbprint = ''
+    $Settings.app.createdAt = ''
+    $deleted
+}

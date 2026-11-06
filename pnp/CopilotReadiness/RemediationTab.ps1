@@ -576,10 +576,11 @@ function Add-CrRemediationTab {
     $beforeDate.Add_ValueChanged({ & $update }.GetNewClosure())
 
     # The latest fix of this tenant comes back when the window opens, with its choices and sites:
-    # one still running is followed again, and a finished preview whose links haven't been removed
-    # is shown again, so Remove can be pressed without previewing a big OneDrive all over.
+    # one still running is followed again, a finished preview whose links haven't been removed
+    # is shown again, so Remove can be pressed without previewing a big OneDrive all over, and a
+    # Remove that was cut off shows what it did before it stopped.
     $latest = Get-CrLatestFix -ResultsRoot $resultsRoot -Tenant $tenant
-    if ($latest -and ($latest.Running -or $latest.Previewed)) {
+    if ($latest -and ($latest.Running -or $latest.Previewed -or $latest.Interrupted)) {
         try {
             $fix = Read-CrJson (Join-Path $latest.Folder 'fix.json')
             foreach ($s in $fix.sites) { [void]$chosen.Add($s.url) }
@@ -592,17 +593,51 @@ function Add-CrRemediationTab {
             $st.Folder = $latest.Folder
             $st.Step = $latest.Step
             $st.Key = & $currentKey
+            # Links unticked before Remove was pressed (it saved them in skip.json) stay unticked.
+            $restoreUnticked = {
+                $skipFile = Join-Path $st.Folder 'skip.json'
+                if (Test-Path -LiteralPath $skipFile) { foreach ($k in @(Read-CrJson $skipFile)) { if ($k) { [void]$st.Unticked.Add("$k") } } }
+            }
             if ($latest.Running) {
+                if ($st.Step -eq 'Remove') {
+                    # The preview it is removing from, so that if it ends without removing anything, Remove can be pressed again.
+                    $links = @((Read-CrJson (Join-Path $st.Folder 'preview.json')).links)
+                    $st.Rows = $links
+                    $st.ToRemove = @($links | Where-Object remove).Count
+                    $st.PreviewKey = $st.Key
+                    $st.Sheet = Join-Path $st.Folder 'preview.csv'
+                    $st.ShowingPreview = $true
+                    $results.CheckBoxes = $true
+                    & $restoreUnticked
+                    & $render
+                }
                 $st.Running = $true
                 $timer.Start()
+            }
+            elseif ($latest.Interrupted) {
+                # Cut off without ending (the PC restarted, say): what its journal says it did, link by link.
+                $links = @(Read-CrRemoveJournal $st.Folder)
+                $st.Removed = $true
+                $st.ShowingPreview = $false
+                $st.Rows = $links
+                $results.CheckBoxes = $false
+                & $render
+                $removedN = @($links | Where-Object result -EQ 'Removed').Count
+                $goneN = @($links | Where-Object result -EQ 'Already gone').Count
+                $failedN = @($links | Where-Object { "$($_.result)" -like 'Failed*' }).Count
+                $status.Text = ("Your last Remove was cut off before it finished (the PC restarted or the program was closed, say). Before that: {0:N0} removed, {1:N0} already gone, {2:N0} failed; the list shows each. " +
+                    'The links it didn''t get to were left as they were: press Preview to find them again.') -f $removedN, $goneN, $failedN
             }
             else {
                 # Shown as the finished preview it is, even when a Remove was tried after it and stopped before removing anything.
                 $shownAs = if ($latest.Progress.step -eq 'Preview') { $latest.Progress } else { [pscustomobject]@{ step = 'Preview'; state = 'Completed'; problems = @() } }
                 & $showDone $shownAs
+                & $restoreUnticked
+                & $render
                 $made = $latest.PreviewedAt.ToLocalTime().ToString('MMMM d, h:mm tt')
                 $tried = if ($latest.RemoveProblem) { " Remove was pressed but didn't start ($($latest.RemoveProblem)); nothing was removed." } else { '' }
-                $status.Text = "Your last preview, from $made.$tried $($status.Text -replace '^Preview done: ', '')"
+                $kept = if ($st.Unticked.Count) { " The $($st.Unticked.Count) link(s) you unticked are still unticked." } else { '' }
+                $status.Text = "Your last preview, from $made.$tried$kept $($status.Text -replace '^Preview done: ', '')"
             }
         }
         catch { }

@@ -330,8 +330,10 @@ function Invoke-CrGet {
             $resp = Invoke-WebRequest -Uri $Url -Headers $headers -UserAgent $script:UserAgent -SkipHttpErrorCheck -ErrorAction Stop @send
         }
         catch {
-            # Network trouble rather than an answer: retry a few times, then give up.
-            if ($attempt -ge 4) { throw }
+            # Network trouble rather than an answer: retry a few times, then give up. Only reads are
+            # sent again; a change (a POST) may have been made before the answer was lost, so the
+            # caller looks to see whether it was (as Remove does) rather than making it twice.
+            if ($attempt -ge 4 -or $Method -ne 'GET') { throw }
             Start-Sleep -Seconds $delay
             $delay = [Math]::Min($delay * 2, 60)
             continue

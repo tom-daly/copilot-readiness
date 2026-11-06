@@ -105,6 +105,8 @@ $fake = @{
         if ($Url -match "lists\(guid'([^']+)'\)/GetItemById\((\d+)\)/UnshareLink$") {
             if ($Body.shareId -eq $script:Fake.FailOn) { Fail 500 }
             [void]$script:Fake.Gone.Add($Body.shareId)
+            # Done, but the answer never arrives.
+            if ($Body.shareId -eq $script:Fake.Lost) { Fail 504 }
             # Removing a link changes the file, so it turns up in its library's list of changes.
             $script:Fake.Changes["drv-$($Matches[1])"] = @($script:Fake.Changes["drv-$($Matches[1])"]) + [int]$Matches[2]
             return [pscustomobject]@{}
@@ -207,7 +209,8 @@ try {
     $asked = @($fake.Calls | Where-Object Url -like '*GetSharingInformation*' | ForEach-Object { if ($_.Url -match '(finance|dana)\S*GetItemById\((\d+)\)') { "$($Matches[1])$($Matches[2])" } } | Sort-Object) -join ','
     Check "the next preview finds the same links as reading everything would ($ids)" ($ids -eq 'l-fail,l-new-old,l-nodate,l-od-old,l-org-new,l-people-old')
     Check "only changed files are asked about again ($asked)" ($asked -eq 'dana7,finance1,finance2')
-    Check 'no library is read in full' (-not @($fake.Calls | Where-Object { $_.Url -match "lists\(guid'(L1|D1|L9)'\)/items\?" }).Count)
+    # (Checking that files with saved links still exist asks for just those items, by number.)
+    Check 'no library is read in full' (-not @($fake.Calls | Where-Object { $_.Url -match "lists\(guid'(L1|D1|L9)'\)/items\?" -and $_.Url -notmatch 'filter=' }).Count)
     Check 'Microsoft is asked for sharing changes too' (@($fake.Calls | Where-Object { $_.Url -like '*root/delta*' -and $_.Prefer -like '*deltashowsharingchanges*' }).Count -ge 3)
     Check "how it checked is reported (changes $($qp.checked.changes), full $($qp.checked.full), items $($qp.checked.changedItems))" ([int]$qp.checked.changes -eq 2 -and [int]$qp.checked.full -eq 0 -and [int]$qp.checked.changedItems -eq 3 -and $qp.checked.since)
     Check 'decisions are made again with the current choices' (@($qp.links | Where-Object { $_.shareId -eq 'l-new-old' -and $_.remove }).Count -eq 1 -and @($qp.links | Where-Object { $_.shareId -eq 'l-people-old' -and -not $_.remove }).Count -eq 1)
@@ -227,9 +230,18 @@ try {
     Invoke-CrFix -Folder $mixed -Step Preview
     $mp = Read-CrJson (Join-Path $mixed 'preview.json')
     Check "an expired bookmark means reading that library in full, and says why (changes $($mp.checked.changes), full $($mp.checked.full), resync $($mp.checked.resync))" ([int]$mp.checked.changes -eq 1 -and [int]$mp.checked.full -eq 1 -and [int]$mp.checked.resync -eq 1 -and
-        @($fake.Calls | Where-Object { $_.Url -match "lists\(guid'D1'\)/items\?" }).Count -ge 1 -and -not @($fake.Calls | Where-Object { $_.Url -match "lists\(guid'L1'\)/items\?" }).Count)
+        @($fake.Calls | Where-Object { $_.Url -match "lists\(guid'D1'\)/items\?" }).Count -ge 1 -and -not @($fake.Calls | Where-Object { $_.Url -match "lists\(guid'L1'\)/items\?" -and $_.Url -notmatch 'filter=' }).Count)
     Check 'still the same links' ((@($mp.links | ForEach-Object shareId | Sort-Object) -join ',') -eq $ids)
     [void]$fake.Expired.Remove('drv-D1')
+
+    # A file deleted since, which Microsoft's list of changes doesn't name: its links don't linger.
+    $payroll = $fake.Items["$fin|L1"] | Where-Object { $_.Id -eq 3 }
+    $fake.Items["$fin|L1"] = @($fake.Items["$fin|L1"] | Where-Object { $_.Id -ne 3 })
+    $ghost = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites $sites -Options $wide180
+    Invoke-CrFix -Folder $ghost -Step Preview
+    $gp = Read-CrJson (Join-Path $ghost 'preview.json')
+    Check "links on a deleted file are dropped ($(@($gp.links | ForEach-Object shareId | Sort-Object) -join ','))" ([int]$gp.checked.changes -eq 2 -and -not @($gp.links | Where-Object { $_.shareId -in 'l-fail', 'l-nodate' }).Count -and @($gp.links | Where-Object shareId -EQ 'l-new-old').Count -eq 1)
+    $fake.Items["$fin|L1"] = @($fake.Items["$fin|L1"]) + $payroll
 
     # ── Stop: a preview stopped part way says so and leaves no preview behind ──
     $stopped = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites $sites -Options $wide180
@@ -254,6 +266,7 @@ try {
     Invoke-CrFix -Folder $broken -Step Preview
     $toGo = @((Read-CrJson (Join-Path $broken 'preview.json')).links | Where-Object remove).Count
     & $module {
+        $script:ProgressEverySeconds = 0   # save progress at every file, so the second save comes after a removal
         $script:RealProgress = ${function:Write-CrFixProgress}
         $script:ProgressCalls = 0
         function script:Write-CrFixProgress {
@@ -263,7 +276,7 @@ try {
         }
     }
     $threw = try { Invoke-CrFix -Folder $broken -Step Remove; $false } catch { $_.Exception.Message -like '*in use*' }
-    & $module { Set-Item function:script:Write-CrFixProgress $script:RealProgress }
+    & $module { Set-Item function:script:Write-CrFixProgress $script:RealProgress; $script:ProgressEverySeconds = 2 }
     $rec = Read-CrJson (Join-Path $broken 'removed.json')
     $removedFirst = @($rec.links | Where-Object result -EQ 'Removed').Count
     $notReached = @($rec.links | Where-Object { $_.result -like 'Not removed: it stopped*' }).Count
@@ -273,6 +286,32 @@ try {
     $bp = Read-CrProgress $broken
     Check "the window is told it failed, with the counts ($($bp.state), removed $($bp.removed))" ($bp.state -eq 'Failed' -and [int]$bp.removed -eq $removedFirst -and $bp.error -like '*in use*')
     Check 'that preview is not offered for Remove again' (-not (Get-CrLatestFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com').Previewed)
+
+    Check 'each link is written down as it is dealt with' (@(Read-CrRemoveJournal $broken).Count -eq $removedFirst)
+
+    # ── A Remove cut off outright (the PC restarts): never offered again as untouched ──
+    $fake.Links["$od|D1|7"] = @((Link 'l-cut' 2 1 $old))
+    $cut = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options ([pscustomobject]@{ links = @('Anyone', 'Organization', 'SpecificPeople'); age = 'Any' })
+    Invoke-CrFix -Folder $cut -Step Preview
+    $firstLink = @((Read-CrJson (Join-Path $cut 'preview.json')).links | Where-Object remove)[0] | Select-Object *
+    $firstLink | Add-Member -NotePropertyName result -NotePropertyValue 'Removed'
+    Set-Content -LiteralPath (Join-Path $cut 'remove-journal.jsonl') -Value ((ConvertTo-Json $firstLink -Compress) + "`n" + '{"half a li') -Encoding utf8
+    Write-CrFixProgress -Folder $cut -Step Remove -State Running -Total 2 -Done 1   # as the killed process left it
+    $l = Get-CrLatestFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com'
+    Check 'a Remove cut off part way is seen as such, not as untouched' ($l.Folder -eq $cut -and $l.Interrupted -and -not $l.Previewed -and $l.Step -eq 'Remove')
+    Check 'its journal says what it did, skipping a half-written line' (@(Read-CrRemoveJournal $cut).Count -eq 1 -and (Read-CrRemoveJournal $cut)[0].result -eq 'Removed')
+    $again = try { Invoke-CrFix -Folder $cut -Step Remove; $false } catch { $_.Exception.Message -like '*cut off*' }
+    Check 'and Remove is not run on it again' $again
+
+    # ── A removal whose answer was lost after SharePoint had done it counts as removed ──
+    $fake.Links["$od|D1|7"] = @((Link 'l-lost' 2 1 $old))
+    $fake.Lost = 'l-lost'
+    $lost = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options ([pscustomobject]@{ links = @('Organization'); age = 'Any'; fullCheck = $true })
+    Invoke-CrFix -Folder $lost -Step Preview
+    Invoke-CrFix -Folder $lost -Step Remove
+    $lr = @((Read-CrJson (Join-Path $lost 'removed.json')).links | Where-Object shareId -EQ 'l-lost')
+    Check "a lost answer is checked, not counted as failed ($($lr.result))" ($lr.Count -eq 1 -and $lr[0].result -eq 'Removed')
+    $fake.Lost = $null
 
     # ── A Remove that stops before removing anything keeps its preview ──
     $unstarted = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options $wide180

@@ -486,6 +486,16 @@ $startTab = $null
             # Once the app is gone from the tenant, the messages say so, whatever happens on this computer after.
             Add-Type -AssemblyName System.Windows.Forms
             $tenantName = $settings.tenant
+            # Not while something is working in the background: it would be cut off halfway, a Remove included.
+            $busy = @(
+                $(if (Get-CrRunningScan $resultsFolder -Tenant $tenantName) { 'a scan' })
+                $(if ((Get-CrLatestFix -ResultsRoot $resultsFolder -Tenant $tenantName).Running) { 'a preview or removal of sharing links' })
+            ) | Where-Object { $_ }
+            if ($busy) {
+                [void][System.Windows.Forms.MessageBox]::Show("Copilot Readiness is still running $($busy -join ' and ') in the background. Let it finish, or stop it, then remove Copilot Readiness. Nothing has been changed.", 'Copilot Readiness', 'OK', 'Information')
+                $startTab = 'Settings'
+                continue window
+            }
             $thumbprint = "$($settings.app.thumbprint)"
             $removal = $null
             try {

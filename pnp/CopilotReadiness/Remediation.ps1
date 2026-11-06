@@ -13,6 +13,9 @@
 
 $script:NoShareId = '00000000-0000-0000-0000-000000000000'
 
+# How often Remove saves how far it has got for the window (every link's result is written as it happens).
+$script:ProgressEverySeconds = 2
+
 # The words each link type is shown with, in the window and the spreadsheets.
 $script:LinkTypeWords = [ordered]@{
     Anyone         = 'Anyone'
@@ -72,23 +75,28 @@ function Get-CrTeamsMarks {
     <#
       The Teams and channel marks (Read-CrTeamsMarks), kept in the results folder so the window
       doesn't list every site in the tenant each time it opens. Read again once they're a week
-      old, or with -Refresh. Returns address -> mark.
+      old, or with -Refresh; if they can't be read then, the saved ones are used. Returns
+      address -> mark.
     #>
     param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ResultsRoot, [switch] $Refresh)
     $path = Join-Path $ResultsRoot ("teams-sites-{0}.json" -f ($Settings.tenant -replace '[^A-Za-z0-9.-]', '_'))
-    if (-not $Refresh -and (Test-Path -LiteralPath $path)) {
+    $savedMarks = $null
+    if (Test-Path -LiteralPath $path) {
         try {
             $saved = Read-CrJson $path
             $readAt = [DateTimeOffset]::Parse($saved.readAt, [Globalization.CultureInfo]::InvariantCulture)
-            if ($readAt -gt [DateTimeOffset]::UtcNow.AddDays(-$script:TeamsMarksDays)) {
-                $marks = @{}
-                foreach ($p in $saved.marks.PSObject.Properties) { $marks[$p.Name] = "$($p.Value)" }
-                return $marks
-            }
+            $savedMarks = @{}
+            foreach ($p in $saved.marks.PSObject.Properties) { $savedMarks[$p.Name] = "$($p.Value)" }
+            if (-not $Refresh -and $readAt -gt [DateTimeOffset]::UtcNow.AddDays(-$script:TeamsMarksDays)) { return $savedMarks }
         }
-        catch { }   # unreadable: read again
+        catch { $savedMarks = $null }   # unreadable: read again
     }
-    $marks = Read-CrTeamsMarks $Settings
+    try { $marks = Read-CrTeamsMarks $Settings }
+    catch {
+        # Can't be read just now: the last copy, however old, is better than none.
+        if ($savedMarks) { Write-Host "Couldn't read which sites belong to Teams just now, so using the list from before: $($_.Exception.Message)"; return $savedMarks }
+        throw
+    }
     New-Item -ItemType Directory -Path $ResultsRoot -Force | Out-Null
     Write-CrJson $path ([pscustomobject][ordered]@{ tenant = $Settings.tenant; readAt = [DateTimeOffset]::UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); marks = [pscustomobject]$marks })
     $result = @{}
@@ -308,14 +316,36 @@ function Update-CrFixPace {
     catch { }   # half written: picked up next time
 }
 
+function Test-CrRemoveStarted {
+    <# Whether a Remove of this fix has dealt with any link: its journal has a line, or its record exists. #>
+    param([Parameter(Mandatory)] [string] $Folder)
+    if (Test-Path -LiteralPath (Join-Path $Folder 'removed.json')) { return $true }
+    $journal = Join-Path $Folder 'remove-journal.jsonl'
+    [System.IO.File]::Exists($journal) -and ([System.IO.FileInfo]::new($journal)).Length -gt 0
+}
+
+function Read-CrRemoveJournal {
+    <# What an interrupted Remove did, link by link, from its journal (each with its result). #>
+    param([Parameter(Mandatory)] [string] $Folder)
+    $journal = Join-Path $Folder 'remove-journal.jsonl'
+    if (-not [System.IO.File]::Exists($journal)) { return @() }
+    $stream = [System.IO.File]::Open($journal, 'Open', 'Read', [System.IO.FileShare]'ReadWrite, Delete')
+    try { $lines = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8).ReadToEnd() -split "`r?`n" }
+    finally { $stream.Dispose() }
+    # A line cut off halfway by the stop is skipped.
+    @(foreach ($line in $lines) { if ($line.Trim()) { try { $line | ConvertFrom-Json -DateKind String } catch { } } })
+}
+
 function Get-CrLatestFix {
     <#
       The newest fix of this tenant, or nothing: its Folder, Step (Preview or Remove), Progress,
       Running (a process is on it now), Previewed (its preview finished and none of its links
       have been removed, so Remove can still be pressed), PreviewedAt (when that preview
-      finished) and RemoveProblem (why a Remove that changed nothing didn't finish, if one
-      was tried: say the sign-in failed). A Remove that removed anything always leaves
-      removed.json, so a preview without one has had nothing removed.
+      finished), RemoveProblem (why a Remove that changed nothing didn't finish, if one
+      was tried: say the sign-in failed) and Interrupted (a Remove was cut off without ending,
+      as when the PC restarts, after dealing with some links; its journal says which). A
+      Remove that dealt with any link leaves its journal, so a preview without one has had
+      nothing removed.
     #>
     param([Parameter(Mandatory)] [string] $ResultsRoot, [Parameter(Mandatory)] [string] $Tenant)
     $root = Get-CrFixRoot $ResultsRoot
@@ -326,8 +356,10 @@ function Get-CrLatestFix {
             $progress = Read-CrProgress $dir.FullName
             $running = Test-CrScanRunning $dir.FullName
             $previewFile = Join-Path $dir.FullName 'preview.json'
-            $previewed = -not $running -and (Test-Path -LiteralPath $previewFile) -and -not (Test-Path -LiteralPath (Join-Path $dir.FullName 'removed.json')) -and
-                $progress -and $progress.state -ne 'Starting'
+            $started = Test-CrRemoveStarted $dir.FullName
+            $previewed = -not $running -and (Test-Path -LiteralPath $previewFile) -and -not $started -and $progress -and $progress.state -ne 'Starting'
+            # Cut off: it dealt with links but never wrote its ending, and nothing is working on it now.
+            $interrupted = -not $running -and $started -and -not (Test-Path -LiteralPath (Join-Path $dir.FullName 'removed.json'))
             $at = if ($previewed) { [DateTimeOffset]::Parse((Read-CrJson $previewFile).finishedAt, [Globalization.CultureInfo]::InvariantCulture) }
             $removeProblem = if ($previewed -and $progress.step -eq 'Remove') {
                 if ($progress.error) { "$($progress.error)" } else { 'it stopped before removing anything' }
@@ -340,6 +372,7 @@ function Get-CrLatestFix {
                 Previewed     = [bool]$previewed
                 PreviewedAt   = $at
                 RemoveProblem = $removeProblem
+                Interrupted   = [bool]$interrupted
             }
         }
         catch { continue }   # a folder that isn't a fix, or is half written
@@ -523,8 +556,20 @@ function Get-CrSiteLinkInventory {
                 # By item number; the library's own top folder has none and carries no links.
                 $touched = [ordered]@{}
                 foreach ($it in $changes.Items) { $n = "$($it.sharepointIds.listItemId)"; if ($n) { $touched[$n] = $it } }
+                $kept = @(foreach ($old in @($Saved.links)) { if ($old -and "$($old.listId)" -eq $listId -and -not $touched.Contains("$($old.itemId)")) { $old } })
+                # Microsoft's list doesn't always say which item a deleted file was, so the files whose links
+                # are carried over are checked to still be there: a few dozen to a request.
+                $alive = [System.Collections.Generic.HashSet[string]]::new()
+                $ids = @($kept | ForEach-Object { [int]$_.itemId } | Sort-Object -Unique)
+                for ($i = 0; $i -lt $ids.Count; $i += 40) {
+                    $chunk = $ids[$i..([Math]::Min($i + 39, $ids.Count - 1))]
+                    $filter = [uri]::EscapeDataString((@($chunk | ForEach-Object { "Id eq $_" }) -join ' or '))
+                    # Get-CrAll hands back the whole list as one value, so it's held first and then gone through.
+                    $there = Get-CrAll "$url/_api/web/lists(guid'$listId')/items?`$select=Id&`$filter=$filter&`$top=100"
+                    foreach ($it in $there) { [void]$alive.Add("$($it.Id)") }
+                }
                 $fresh = [System.Collections.Generic.List[object]]::new()
-                foreach ($old in @($Saved.links)) { if ($old -and "$($old.listId)" -eq $listId -and -not $touched.Contains("$($old.itemId)")) { $fresh.Add($old) } }
+                foreach ($old in $kept) { if ($alive.Contains("$($old.itemId)")) { $fresh.Add($old) } }
                 foreach ($n in $touched.Keys) {
                     if ($OnItem) { & $OnItem }
                     # Where it is now (it may have moved), and whether it still has its own permissions.
@@ -717,12 +762,14 @@ function Invoke-CrLinkRemove {
       The Remove step: removes exactly the links the preview said to remove, except any
       unticked in the window, which skip.json lists (by Get-CrLinkKey) and which are left as
       they are. Each file is asked about again first, and a link no longer there is counted
-      as already gone.
+      as already gone. Each result is written to remove-journal.jsonl as it happens, and the
+      whole record to removed.json and removed.csv at the end, however it ends.
     #>
     param([Parameter(Mandatory)] [string] $Folder)
     $previewFile = Join-Path $Folder 'preview.json'
     if (-not (Test-Path -LiteralPath $previewFile)) { throw 'There is no finished preview to remove links from.' }
     if (Test-Path -LiteralPath (Join-Path $Folder 'removed.json')) { throw 'The links in this preview have already been removed.' }
+    if (Test-CrRemoveStarted $Folder) { throw 'A Remove of this preview already started and was cut off. Preview again to remove the rest.' }
     $preview = Read-CrJson $previewFile
     $skipFile = Join-Path $Folder 'skip.json'
     $skip = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -773,11 +820,20 @@ function Invoke-CrLinkRemove {
 
     $ended = 'Failed'
     $problem = $null
+    # A line per link as it's done, flushed straight to disk, so even a run that is killed outright
+    # (the PC restarts, the user signs out) leaves a record of what it removed (see Get-CrLatestFix).
+    $journal = [System.IO.StreamWriter]::new((Join-Path $Folder 'remove-journal.jsonl'), $true, [System.Text.UTF8Encoding]::new($false))
+    $journal.AutoFlush = $true
+    # Progress is saved every couple of seconds, as the preview does, not for every file.
+    $lastSaved = [DateTime]::MinValue
     try {
         foreach ($group in $todo | Group-Object site, listId, itemId) {
             $first = $group.Group[0]
-            Update-CrFixPace $Folder
-            Write-CrFixProgress -Folder $Folder -Step Remove -State Running -Total $todo.Count -Done ($done.Count - $skipped) -Current $first.url -Counts $counts
+            if (([DateTime]::UtcNow - $lastSaved).TotalSeconds -ge $script:ProgressEverySeconds) {
+                Update-CrFixPace $Folder
+                Write-CrFixProgress -Folder $Folder -Step Remove -State Running -Total $todo.Count -Done ($done.Count - $skipped) -Current $first.url -Counts $counts
+                $lastSaved = [DateTime]::UtcNow
+            }
             $present = $null
             try { $present = @(Get-CrItemLinks (Get-CrSharingInfo $first.site $first.listId $first.itemId) | ForEach-Object { "$($_.linkDetails.ShareId)" }) }
             catch {
@@ -795,7 +851,11 @@ function Invoke-CrLinkRemove {
                     }
                     catch {
                         if ($_.Exception -is [System.OperationCanceledException]) { throw }
-                        "Failed: $($_.Exception.Message)"
+                        $why = $_.Exception.Message
+                        # The answer can be lost after SharePoint has done it (a timeout, say): look before calling it failed.
+                        $stillThere = try { @(Get-CrItemLinks (Get-CrSharingInfo $link.site $link.listId $link.itemId) | ForEach-Object { "$($_.linkDetails.ShareId)" }) -contains $link.shareId }
+                        catch { if ($_.Exception -is [System.OperationCanceledException]) { throw }; $true }
+                        if ($stillThere) { "Failed: $why" } else { 'Removed' }
                     }
                 }
                 switch -Wildcard ($result) { 'Removed' { $counts.removed++ } 'Already gone' { $counts.gone++ } 'Failed*' { $counts.failed++ } }
@@ -803,12 +863,16 @@ function Invoke-CrLinkRemove {
                 $copy = $link | Select-Object *
                 $copy | Add-Member -NotePropertyName result -NotePropertyValue $result
                 $done.Add($copy)
+                $journal.WriteLine((ConvertTo-Json -InputObject $copy -Compress -Depth 5))
             }
         }
         $ended = 'Completed'
     }
     catch [System.OperationCanceledException] { $ended = 'Cancelled' }
     catch { $problem = $_.Exception.Message; throw }
-    finally { & $finish $ended $problem }
+    finally {
+        $journal.Dispose()
+        & $finish $ended $problem
+    }
     Write-Host "$(Get-Date -Format s) Remove $(if ($ended -eq 'Completed') { 'done' } else { 'stopped' }): $($counts.removed) removed, $($counts.gone) already gone, $($counts.failed) failed, $skipped left as unticked."
 }

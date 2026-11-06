@@ -273,16 +273,24 @@ function Start-CrBackgroundFix {
         [Parameter(Mandatory)] [string] $SettingsPath,
         [ValidateSet('Gentle', 'Normal', 'Fast')] [string] $Pace = 'Normal'
     )
-    if (Test-CrScanRunning $Folder) { throw 'This is already running.' }
+    if ((Test-CrScanRunning $Folder) -or (Get-CrFixLaunch $Folder)) { throw 'This is already running.' }
     Remove-Item -LiteralPath (Join-Path $Folder 'stop.request') -ErrorAction SilentlyContinue
     # Each run its own log, so running a step again never writes over the record of an earlier one.
     $log = Join-Path $Folder "$($Step.ToLowerInvariant())-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     $arguments = '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$StartScript`"", '-RunFix', "`"$Folder`"", '-FixStep', $Step, '-FixPace', $Pace, '-SettingsPath', "`"$SettingsPath`""
-    # Nothing is written here: the step writes its own progress as soon as it starts, so its own report
-    # (even an error straight away) always stands, and a launch that fails leaves the folder as it was.
-    # The window follows the process returned until the step reports.
-    Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $arguments -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput "$log.log" -RedirectStandardError "$log-errors.log"
+    # progress.json is left to the step, which writes its own as soon as it starts, so its own report (even an
+    # error straight away) always stands. Until then a 'launching' note says this fix is busy, so a window
+    # opened in those seconds doesn't offer the preview again (see Get-CrFixLaunch); the step removes it.
+    $note = Join-Path $Folder 'launching'
+    Set-Content -LiteralPath $note -Value $Step -NoNewline
+    try {
+        Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $arguments -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput "$log.log" -RedirectStandardError "$log-errors.log"
+    }
+    catch {
+        Remove-Item -LiteralPath $note -Force -ErrorAction SilentlyContinue   # never started: the fix is as it was
+        throw
+    }
 }
 
 function Update-CrFixPace {
@@ -303,6 +311,21 @@ function Update-CrFixPace {
         }
     }
     catch { }   # half written: picked up next time
+}
+
+function Get-CrFixLaunch {
+    <#
+      The step (Preview or Remove) just launched on this fix that hasn't reported yet, or nothing.
+      Start-CrBackgroundFix leaves a 'launching' note before it starts the step, and the step
+      removes it once it has written its own progress. A note older than two minutes is from a
+      step that never got going, and doesn't count.
+    #>
+    param([Parameter(Mandatory)] [string] $Folder)
+    $note = Join-Path $Folder 'launching'
+    if (-not [System.IO.File]::Exists($note)) { return }
+    if ([System.IO.File]::GetLastWriteTimeUtc($note) -lt [DateTime]::UtcNow.AddMinutes(-2)) { return }
+    $step = try { "$([System.IO.File]::ReadAllText($note))".Trim() } catch { '' }
+    if ($step -in 'Preview', 'Remove') { $step } else { 'Preview' }
 }
 
 function Test-CrRemoveStarted {
@@ -343,7 +366,9 @@ function Get-CrLatestFix {
         try {
             if ((Read-CrJson (Join-Path $dir.FullName 'fix.json')).tenant -ne $Tenant) { continue }
             $progress = Read-CrProgress $dir.FullName
-            $running = Test-CrScanRunning $dir.FullName
+            # Running: a process is on it now, or one has just been launched and hasn't reported yet.
+            $launching = Get-CrFixLaunch $dir.FullName
+            $running = (Test-CrScanRunning $dir.FullName) -or [bool]$launching
             $previewFile = Join-Path $dir.FullName 'preview.json'
             $started = Test-CrRemoveStarted $dir.FullName
             $previewed = -not $running -and (Test-Path -LiteralPath $previewFile) -and -not $started
@@ -355,7 +380,7 @@ function Get-CrLatestFix {
             }
             return [pscustomobject]@{
                 Folder        = $dir.FullName
-                Step          = if ($previewed) { 'Preview' } elseif ($progress -and $progress.step -eq 'Remove') { 'Remove' } else { 'Preview' }
+                Step          = if ($launching) { $launching } elseif ($previewed) { 'Preview' } elseif ($progress -and $progress.step -eq 'Remove') { 'Remove' } else { 'Preview' }
                 Progress      = $progress
                 Running       = $running
                 Previewed     = [bool]$previewed
@@ -409,11 +434,14 @@ function New-CrLinkRecord {
     )
     $d = $Link.linkDetails
     $created = ConvertTo-CrLinkDate "$($d.Created)"
-    $people = @(@($Link.linkMembers) + @($d.Invitations | ForEach-Object { $_.invitee }) | Where-Object { $_ } |
-            ForEach-Object { if ($_.email) { "$($_.email)" } elseif ($_.name) { "$($_.name)" } } | Where-Object { $_ } | Select-Object -Unique)
-    # SharePoint names only so many of the people on a link; it says how many there are in all, so the rest
-    # are counted. People invited to the link are usually among them too, so everyone named counts.
-    $more = [int]$Link.totalLinkMembersCount - $people.Count
+    # The link's members, then anyone invited who isn't one of them yet, each once whatever the case of their address.
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $nameOf = { param($p) if ($p.email) { "$($p.email)" } elseif ($p.name) { "$($p.name)" } }
+    $members = @(foreach ($m in @($Link.linkMembers)) { if ($m) { $n = & $nameOf $m; if ($n -and $seen.Add($n)) { $n } } })
+    $invited = @(foreach ($inv in @($d.Invitations)) { if ($inv -and $inv.invitee) { $n = & $nameOf $inv.invitee; if ($n -and $seen.Add($n)) { $n } } })
+    $people = @($members) + @($invited)
+    # SharePoint names only so many of a link's members, and says how many there are in all, so the rest are counted.
+    $more = [int]$Link.totalLinkMembersCount - $members.Count
     if ($more -gt 0) { $people += "and $more more" }
     $by = if ($d.CreatedBy) { if ($d.CreatedBy.email) { "$($d.CreatedBy.email)" } else { "$($d.CreatedBy.name)" } } else { '' }
     [pscustomobject][ordered]@{
@@ -472,7 +500,9 @@ function Get-CrLinkCachePath {
     <# Where what a preview found on a site is kept for the next preview: one file per site, under the results folder. #>
     param([Parameter(Mandatory)] [string] $ResultsRoot, [Parameter(Mandatory)] [string] $Tenant, [Parameter(Mandatory)] [string] $SiteUrl)
     $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($SiteUrl.TrimEnd('/').ToLowerInvariant())))
-    Join-Path $ResultsRoot (Join-Path 'link-cache' (Join-Path (Get-CrTenantFileName $Tenant) "$($hash.Substring(0, 24).ToLowerInvariant()).json"))
+    # The name carries the cache's version, so a cache kept by an earlier version isn't found: that site is
+    # read in full once, and the window doesn't count it as checked before.
+    Join-Path $ResultsRoot (Join-Path 'link-cache' (Join-Path (Get-CrTenantFileName $Tenant) "$($hash.Substring(0, 24).ToLowerInvariant())-v$script:LinkCacheVersion.json"))
 }
 
 function Get-CrLinkCacheTimes {
@@ -861,6 +891,7 @@ function Invoke-CrLinkRemove {
     $journal.AutoFlush = $true
     # Progress is saved every couple of seconds, as the preview does, not for every file.
     $lastSaved = [DateTime]::MinValue
+    $stopNow = $false
     try {
         foreach ($group in $todo | Group-Object site, listId, itemId) {
             $first = $group.Group[0]
@@ -889,11 +920,15 @@ function Invoke-CrLinkRemove {
                         $why = $_.Exception.Message
                         # The answer can be lost after SharePoint has done it (a timeout, say): look before calling it
                         # failed. This one look goes ahead even if Stop has just been pressed, so the record always
-                        # says Removed or Failed; the stop is taken up at the next link.
+                        # says Removed or Failed, but it waits no more than half a minute if SharePoint says wait;
+                        # a Stop pressed meanwhile is acted on straight after it is written down.
                         $stopFile = $script:StopFile
+                        $patience = $script:ThrottlePatienceMinutes
                         Set-CrStopFile $null
+                        $script:ThrottlePatienceMinutes = 0.5
                         try { $stillThere = try { @(Get-CrItemLinks (Get-CrSharingInfo $link.site $link.listId $link.itemId) | ForEach-Object { "$($_.linkDetails.ShareId)" }) -contains $link.shareId } catch { $true } }
-                        finally { Set-CrStopFile $stopFile }
+                        finally { Set-CrStopFile $stopFile; $script:ThrottlePatienceMinutes = $patience }
+                        $stopNow = $stopFile -and [System.IO.File]::Exists($stopFile)
                         if ($stillThere) { "Failed: $why" } else { 'Removed' }
                     }
                 }
@@ -903,6 +938,7 @@ function Invoke-CrLinkRemove {
                 $copy | Add-Member -NotePropertyName result -NotePropertyValue $result
                 $done.Add($copy)
                 $journal.WriteLine((ConvertTo-Json -InputObject $copy -Compress -Depth 5))
+                if ($stopNow) { throw [System.OperationCanceledException]::new('Stopped.') }
             }
         }
         $ended = 'Completed'

@@ -227,7 +227,9 @@ function Add-CrRemediationTab {
     # Rows: the preview's links. Unticked: the links to remove that have been unticked, by Get-CrLinkKey. ShowingPreview: the list holds a preview.
     $st = @{ Filling = $false; Folder = $null; Step = $null; Running = $false; Key = $null; PreviewKey = $null; ToRemove = 0; Removed = $false; Sheet = $null
         Rows = @(); Unticked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase); ShowingPreview = $false; Process = $null
-        SortColumn = -1; SortDescending = $false }
+        SortColumn = -1; SortDescending = $false
+        # Goes up whenever the chosen sites, or their "last checked" times, change (see $chosenInfo).
+        ChosenVersion = 0 }
 
     # Each site by address, and when each was last previewed. Worked out once (and again after each
     # preview), not on every keystroke or tick: a tenant can have thousands of OneDrives.
@@ -239,6 +241,7 @@ function Add-CrRemediationTab {
         $lastChecked.Clear()
         $times = Get-CrLinkCacheTimes -ResultsRoot $resultsRoot -Tenant $tenant -SiteUrls $siteUrls
         foreach ($k in $times.Keys) { $lastChecked[$k] = $times[$k] }
+        $st.ChosenVersion++
     }.GetNewClosure()
     & $readLastChecked
     # Each site's place (SharePoint, Team, Channel or OneDrive), worked out once.
@@ -249,6 +252,7 @@ function Add-CrRemediationTab {
     # The list shows at most this many sites: past a couple of thousand it gets slow to fill. Typing narrows
     # it, and Check all ticks every site that matches, shown or not.
     $maxSitesShown = 2000
+    $siteTick = @{ Handler = $null }   # the site list's tick handler, set below
     $fill = {
         $st.Filling = $true
         $text = $search.Text.Trim()
@@ -273,7 +277,10 @@ function Add-CrRemediationTab {
         $list.BeginUpdate()
         $list.Items.Clear()
         $list.Items.AddRange($lines.ToArray())
-        for ($i = 0; $i -lt $shown.Count; $i++) { if ($chosen.Contains($shown[$i])) { $list.SetItemChecked($i, $true) } }
+        # Ticking the chosen ones would set off the tick handler once each (seconds for thousands), so it is off meanwhile.
+        if ($siteTick.Handler) { $list.Remove_ItemCheck($siteTick.Handler) }
+        try { for ($i = 0; $i -lt $shown.Count; $i++) { if ($chosen.Contains($shown[$i])) { $list.SetItemChecked($i, $true) } } }
+        finally { if ($siteTick.Handler) { $list.Add_ItemCheck($siteTick.Handler) } }
         $list.EndUpdate()
         $moreSites.Visible = $matching.Count -gt $shown.Count
         $moreSites.Text = ('Showing {0:N0} of {1:N0}: type to find the others. Check all ticks all {1:N0}.' -f $shown.Count, $matching.Count)
@@ -293,24 +300,35 @@ function Add-CrRemediationTab {
     }.GetNewClosure()
     # The chosen sites, from the ticked addresses (not by going through every site in the tenant).
     $chosenSites = { @(foreach ($url in $chosen) { if ($siteByUrl.ContainsKey($url)) { $siteByUrl[$url] } }) }.GetNewClosure()
+    # What depends only on the chosen sites (them, their addresses as one piece of text, how many were checked
+    # before), worked out again only when they change, not on every tick: thousands can be chosen at once.
+    $chosenCache = @{ Version = -1; Picked = @(); Sites = ''; Before = 0 }
+    $chosenInfo = {
+        if ($chosenCache.Version -ne $st.ChosenVersion) {
+            $picked = @(& $chosenSites)
+            $chosenCache.Picked = $picked
+            $chosenCache.Sites = (@($picked | ForEach-Object url) | Sort-Object) -join ','
+            $chosenCache.Before = @($picked | Where-Object { $lastChecked.ContainsKey($_.url) }).Count
+            $chosenCache.Version = $st.ChosenVersion
+        }
+        $chosenCache
+    }.GetNewClosure()
     # The choices as one piece of text, to tell whether a finished preview still matches them.
     # Only the option that applies counts, so changing the unused one doesn't undo the preview.
     $currentKey = {
-        param($picked)
-        if ($null -eq $picked) { $picked = & $chosenSites }
         $o = & $readOptions
         $age = switch ($o.age) { 'OlderThan' { "older:$($o.days)" } 'Before' { "before:$($o.before)" } default { 'any' } }
-        "$(@($o.links) -join '+')|$age|$((@($picked | ForEach-Object url) | Sort-Object) -join ',')"
+        "$(@($o.links) -join '+')|$age|$((& $chosenInfo).Sites)"
     }.GetNewClosure()
 
     # The pace stays open while a step runs: changing it then tells the running step (see Update-CrFixPace).
     $inputs = @($actionBox, $linksBox, $ageBox, $fullCheck, $siteBox)
     $update = {
-        $picked = @(& $chosenSites)
-        $n = $picked.Count
+        $info = & $chosenInfo
+        $n = $info.Picked.Count
         $chosenCount.Text = if ($n -eq 1) { '1 chosen' } else { '{0:N0} chosen' -f $n }
         # Whether the next preview reads everything or only what changed, so it's clear before pressing it.
-        $before = @($picked | Where-Object { $lastChecked.ContainsKey($_.url) }).Count
+        $before = $info.Before
         $planNote.Text = if (-not $n) { '' }
         elseif ($fullCheck.Checked) { 'Next preview: every file on the chosen sites is read again.' }
         elseif ($before -eq $n) { "Next preview: all $(if ($n -eq 1) { 'of it was' } else { "$n were" }) checked before, so only what changed since is read." }
@@ -325,7 +343,7 @@ function Add-CrRemediationTab {
         else {
             $preview.Text = 'Preview'
             $preview.Enabled = $n -gt 0 -and @($linkBoxes.Values | Where-Object Checked).Count -gt 0
-            $same = $st.PreviewKey -and $st.PreviewKey -eq (& $currentKey $picked)
+            $same = $st.PreviewKey -and $st.PreviewKey -eq (& $currentKey)
             $ticked = $st.ToRemove - $st.Unticked.Count
             $remove.Enabled = [bool]($same -and -not $st.Removed -and $ticked -gt 0)
             $remove.Text = if ($remove.Enabled) { if ($ticked -eq 1) { 'Remove 1 link' } else { 'Remove {0:N0} links' -f $ticked } } else { 'Remove links' }
@@ -352,7 +370,7 @@ function Add-CrRemediationTab {
             $type = "$($r.type)"
             if ($typeWords.ContainsKey($type)) { $type = $typeWords[$type] }
             $cells[$i] = [string[]]@('', $type, "$($r.access)", $made, "$($r.sharedWith)", "$($r.url)", $(if ($r.siteTitle) { "$($r.siteTitle)" } else { "$($r.site)" }))
-            $keys[$i] = "$($r.site)|$($r.listId)|$($r.itemId)|$($r.shareId)"   # as Get-CrLinkKey
+            $keys[$i] = Get-CrLinkKey $r
         }
         $prep.For = $rows; $prep.Cells = $cells; $prep.Keys = $keys
     }.GetNewClosure()
@@ -376,23 +394,23 @@ function Add-CrRemediationTab {
         $rows = $st.Rows
         $n = $rows.Count
         $preview = $st.ShowingPreview
-        $what = [string[]]::new($n)
         $pick = [System.Collections.Generic.List[int]]::new()
         for ($i = 0; $i -lt $n; $i++) {
-            $r = $rows[$i]
-            $what[$i] = if (-not $preview) { "$($r.result)" } elseif (-not $r.remove) { "Keep: $($r.why)" } elseif ($st.Unticked.Contains($prep.Keys[$i])) { 'Keep: you unticked it' } else { 'Will be removed' }
-            if (-not $preview -or $r.remove -or -not $hideKept.Checked) { $pick.Add($i) }
+            if (-not $preview -or $rows[$i].remove -or -not $hideKept.Checked) { $pick.Add($i) }
         }
         $order = $pick.ToArray()
         if ($st.SortColumn -ge 0 -and $order.Count -gt 1) {
-            # Sorted on prepared keys; the position after each keeps rows that tie in their order. Dates sort as
-            # dates (unknown ones first), the rest as the text shown.
+            # Sorted on prepared keys. The position after each keeps rows that tie in the order they were found,
+            # both ways: for high to low, the positions count down, so turning the list round keeps ties in order.
+            # Dates sort as dates (unknown ones first), the rest as the text shown.
             $col = $st.SortColumn
+            $last = $order.Count - 1
             $sortKeys = [string[]]::new($order.Count)
             for ($j = 0; $j -lt $order.Count; $j++) {
                 $i = $order[$j]
-                $k = if ($col -eq 0) { $what[$i] } elseif ($col -eq 3) { "$($rows[$i].created)" } else { $prep.Cells[$i][$col] }
-                $sortKeys[$j] = "$k`0$($j.ToString('D7'))"
+                $k = if ($col -eq 0) { & $whatOf $i } elseif ($col -eq 3) { "$($rows[$i].created)" } else { $prep.Cells[$i][$col] }
+                $place = if ($st.SortDescending) { $last - $j } else { $j }
+                $sortKeys[$j] = "$k`0$($place.ToString('D7'))"
             }
             [Array]::Sort($sortKeys, $order, [StringComparer]::OrdinalIgnoreCase)
             if ($st.SortDescending) { [Array]::Reverse($order) }
@@ -475,6 +493,17 @@ function Add-CrRemediationTab {
         & $update
     }.GetNewClosure()
 
+    # Whether progress was written by the step this window started: same process number and start time.
+    $fromStep = {
+        param($p)
+        if ($null -eq $p -or -not $st.Process -or [int]$p.pid -ne $st.Process.Id) { return $false }
+        $mine = [DateTimeOffset]::MinValue; $theirs = [DateTimeOffset]::MinValue
+        $stamp = Get-CrProcessStamp $st.Process
+        if (-not [DateTimeOffset]::TryParse($stamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$mine) -or
+            -not [DateTimeOffset]::TryParse("$($p.processStartedAt)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$theirs)) { return $stamp -eq "$($p.processStartedAt)" }
+        [Math]::Abs(($mine - $theirs).TotalSeconds) -lt 1
+    }.GetNewClosure()
+
     # Follows the step running in the background, once a second.
     $timer = [System.Windows.Forms.Timer]@{ Interval = 1000 }
     $timer.Add_Tick({
@@ -482,16 +511,19 @@ function Add-CrRemediationTab {
             $p = Read-CrProgress $st.Folder
             # Started from this window: until the step itself reports (it writes progress with its own process),
             # what's in the file is from before, so it is followed by its process instead, however long it takes.
-            if ($st.Process -and ($null -eq $p -or [int]$p.pid -ne $st.Process.Id)) {
+            # Its report is known by the process's number and when it started, since Windows reuses numbers.
+            if ($st.Process -and -not (& $fromStep $p)) {
                 if (-not $st.Process.HasExited) { $status.Text = 'Starting...'; return }
                 $p = Read-CrProgress $st.Folder   # it may have reported just as it ended
-                if ($null -eq $p -or [int]$p.pid -ne $st.Process.Id) {
+                if (-not (& $fromStep $p)) {
                     $timer.Stop()
                     $st.Process = $null
                     & $showDone ([pscustomobject]@{ state = 'Failed'; error = "it closed before starting; the log in its folder says why"; problems = @() })
                     return
                 }
             }
+            # Opened while a step was just being launched (from another window): its note is there until it reports.
+            if (-not $st.Process -and (Get-CrFixLaunch $st.Folder)) { $status.Text = 'Starting...'; return }
             if (-not $p) { return }
             if ($p.state -in 'Completed', 'Cancelled', 'Failed') { $timer.Stop(); $st.Process = $null; & $showDone $p; return }
             if (-not (Test-CrScanRunning $st.Folder)) {
@@ -593,11 +625,14 @@ function Add-CrRemediationTab {
         }
         & $update
     }.GetNewClosure()
-    $results.Add_MouseClick({
-            param($sender, $e)
-            $hit = $results.HitTest($e.Location)
-            if ($hit.Item -and $hit.Location -eq [System.Windows.Forms.ListViewHitTestLocations]::StateImage) { & $toggle @($hit.Item.Index) }
-        }.GetNewClosure())
+    # A quick second click on a box arrives as a double click, not a click, so both count.
+    $onBoxClick = {
+        param($sender, $e)
+        $hit = $results.HitTest($e.Location)
+        if ($hit.Item -and $hit.Location -eq [System.Windows.Forms.ListViewHitTestLocations]::StateImage) { & $toggle @($hit.Item.Index) }
+    }.GetNewClosure()
+    $results.Add_MouseClick($onBoxClick)
+    $results.Add_MouseDoubleClick($onBoxClick)
     $results.Add_KeyDown({
             param($sender, $e)
             if ($e.KeyCode -ne 'Space') { return }
@@ -627,16 +662,20 @@ function Add-CrRemediationTab {
     $searchPause.Add_Tick({ $searchPause.Stop(); & $fill }.GetNewClosure())
     $search.Add_TextChanged({ $searchPause.Stop(); $searchPause.Start() }.GetNewClosure())
     $form.Add_FormClosed({ $searchPause.Stop(); $searchPause.Dispose() }.GetNewClosure())
-    $list.Add_ItemCheck({
-            param($sender, $e)
-            if ($st.Filling) { return }
-            $url = $shown[$e.Index]
-            if ($e.NewValue -eq 'Checked') { [void]$chosen.Add($url) } else { [void]$chosen.Remove($url) }
-            # ItemCheck fires before the tick changes, so count after it has.
-            $form.BeginInvoke([Action]{ & $update }) | Out-Null
-        }.GetNewClosure())
-    $tickShown.Add_LinkClicked({ foreach ($url in $matching) { [void]$chosen.Add($url) }; & $fill; & $update }.GetNewClosure())
-    $clearAll.Add_LinkClicked({ $chosen.Clear(); & $fill; & $update }.GetNewClosure())
+    $siteTick.Handler = [System.Windows.Forms.ItemCheckEventHandler]{
+        param($sender, $e)
+        if ($st.Filling) { return }
+        $url = $shown[$e.Index]
+        if ($e.NewValue -eq 'Checked') { [void]$chosen.Add($url) } else { [void]$chosen.Remove($url) }
+        $st.ChosenVersion++
+        # ItemCheck fires before the tick changes, so count after it has.
+        $form.BeginInvoke([Action]{ & $update }) | Out-Null
+    }.GetNewClosure()
+    $list.Add_ItemCheck($siteTick.Handler)
+    # Check all and Clear act on what the search box says now, even if typing paused only a moment ago.
+    $searchNow = { if ($searchPause.Enabled) { $searchPause.Stop(); & $fill } }.GetNewClosure()
+    $tickShown.Add_LinkClicked({ & $searchNow; foreach ($url in $matching) { [void]$chosen.Add($url) }; $st.ChosenVersion++; & $fill; & $update }.GetNewClosure())
+    $clearAll.Add_LinkClicked({ & $searchNow; $chosen.Clear(); $st.ChosenVersion++; & $fill; & $update }.GetNewClosure())
     foreach ($r in @($linkBoxes.Values) + $ageRadios) { $r.Add_CheckedChanged({ & $update }.GetNewClosure()) }
     $days.Add_ValueChanged({ & $update }.GetNewClosure())
     $fullCheck.Add_CheckedChanged({ & $update }.GetNewClosure())
@@ -659,6 +698,7 @@ function Add-CrRemediationTab {
         try {
             $fix = Read-CrJson (Join-Path $latest.Folder 'fix.json')
             foreach ($s in $fix.sites) { [void]$chosen.Add($s.url) }
+            $st.ChosenVersion++
             foreach ($type in $linkBoxes.Keys) { $linkBoxes[$type].Checked = @($fix.options.links) -contains $type }
             switch ($fix.options.age) {
                 'Any' { $anyAge.Checked = $true }

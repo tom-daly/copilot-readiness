@@ -344,6 +344,24 @@ try {
     $many.totalLinkMembersCount = 5
     $rec = New-CrLinkRecord -Site $sites[2] -ListId 'D1' -ItemId 7 -Url 'x' -Link ([pscustomobject]$many | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
     Check "the rest are counted ($($rec.sharedWith))" ($rec.sharedWith -eq 'a@contoso.com; b@contoso.com; and 3 more')
+    # Someone invited who isn't a member yet is named, but doesn't count against the members; case doesn't matter.
+    $many.linkDetails.Invitations = @(@{ invitee = @{ email = 'guest@fabrikam.com' } }, @{ invitee = @{ email = 'A@CONTOSO.COM' } })
+    $rec = New-CrLinkRecord -Site $sites[2] -ListId 'D1' -ItemId 7 -Url 'x' -Link ([pscustomobject]$many | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
+    Check "invitees named apart from the count ($($rec.sharedWith))" ($rec.sharedWith -eq 'a@contoso.com; b@contoso.com; guest@fabrikam.com; and 3 more')
+
+    # ── A step just launched, before it reports: the fix counts as busy ──
+    $busy = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options $wide180
+    Invoke-CrFix -Folder $busy -Step Preview
+    Set-Content -LiteralPath (Join-Path $busy 'launching') -Value 'Remove' -NoNewline
+    $l = Get-CrLatestFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com'
+    Check 'a step being launched counts as running, not as a preview ready to remove from' ($l.Folder -eq $busy -and $l.Running -and -not $l.Previewed -and $l.Step -eq 'Remove')
+    (Get-Item (Join-Path $busy 'launching')).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-3)
+    $l = Get-CrLatestFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com'
+    Check 'a launch that never reported stops counting after two minutes' ($l.Folder -eq $busy -and -not $l.Running -and $l.Previewed)
+    Remove-Item -LiteralPath (Join-Path $busy 'launching')
+
+    # ── Link caches carry their version in their names ──
+    Check 'cache file names carry the version' ((Get-CrLinkCachePath -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -SiteUrl $od) -like '*-v2.json')
 
     # ── A Remove that stops before removing anything keeps its preview ──
     $unstarted = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options $wide180

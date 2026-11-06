@@ -134,8 +134,10 @@ if ($RunScan) {
 if ($RunFix) {
     $ProgressPreference = 'SilentlyContinue'
     try {
-        # This step's own 'Starting', with this process, so the window can tell it's alive.
+        # This step's own 'Starting', with this process, so the window can tell it's alive; then the
+        # 'launching' note the window left is no longer needed.
         Write-CrFixProgress -Folder $RunFix -Step $FixStep -State Starting
+        Remove-Item -LiteralPath (Join-Path $RunFix 'launching') -Force -ErrorAction SilentlyContinue
         $fix = Get-Content -LiteralPath (Join-Path $RunFix 'fix.json') -Raw | ConvertFrom-Json
         Set-CrTenant $settings $fix.tenant
         Import-Module PnP.PowerShell -MinimumVersion (Get-CrPnPRequired)

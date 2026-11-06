@@ -305,7 +305,9 @@ function Invoke-CrGet {
         [ValidateSet('GET', 'POST')] [string] $Method = 'GET',
         $Body,
         # Not called Headers: PowerShell ignores case, so that would be the same variable as $headers below.
-        [hashtable] $ExtraHeaders = @{}
+        [hashtable] $ExtraHeaders = @{},
+        # A POST that only reads (SharePoint asks for some reads as POSTs), so it is safe to send again.
+        [switch] $SafeToRetry
     )
     $isGraph = $Url.StartsWith('https://graph.microsoft.com/', [StringComparison]::OrdinalIgnoreCase)
     $delay = 2
@@ -331,9 +333,9 @@ function Invoke-CrGet {
         }
         catch {
             # Network trouble rather than an answer: retry a few times, then give up. Only reads are
-            # sent again; a change (a POST) may have been made before the answer was lost, so the
-            # caller looks to see whether it was (as Remove does) rather than making it twice.
-            if ($attempt -ge 4 -or $Method -ne 'GET') { throw }
+            # sent again (a GET, or a POST marked SafeToRetry); a change may have been made before the
+            # answer was lost, so the caller looks to see whether it was (as Remove does) rather than making it twice.
+            if ($attempt -ge 4 -or ($Method -ne 'GET' -and -not $SafeToRetry)) { throw }
             Start-Sleep -Seconds $delay
             $delay = [Math]::Min($delay * 2, 60)
             continue
@@ -371,9 +373,9 @@ function Invoke-CrGet {
 }
 
 function Invoke-CrPost {
-    <# One POST to SharePoint with a JSON body. #>
-    param([Parameter(Mandatory)] [string] $Url, $Body)
-    Invoke-CrGet -Url $Url -Method POST -Body $Body
+    <# One POST to SharePoint with a JSON body. SafeToRetry: it only reads, so it can be sent again after a network error. #>
+    param([Parameter(Mandatory)] [string] $Url, $Body, [switch] $SafeToRetry)
+    Invoke-CrGet -Url $Url -Method POST -Body $Body -SafeToRetry:$SafeToRetry
 }
 
 function Get-CrPage {

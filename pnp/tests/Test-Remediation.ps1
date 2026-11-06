@@ -71,7 +71,7 @@ $fake = @{
     param($fake)
     $script:Fake = $fake
     function script:Invoke-CrGet {
-        param([string] $Url, [switch] $AdvancedQuery, [string] $Method = 'GET', $Body, [hashtable] $ExtraHeaders = @{})
+        param([string] $Url, [switch] $AdvancedQuery, [string] $Method = 'GET', $Body, [hashtable] $ExtraHeaders = @{}, [switch] $SafeToRetry)
         Assert-CrNotStopped
         $script:Fake.Calls.Add([pscustomobject]@{ Method = $Method; Url = $Url; Body = $Body; Prefer = "$($ExtraHeaders.Prefer)" })
         function Fail([int] $status) { $ex = [System.Net.Http.HttpRequestException]::new("HTTP $status from $Url"); $ex.Data['Status'] = $status; throw $ex }
@@ -105,8 +105,11 @@ $fake = @{
         if ($Url -match "lists\(guid'([^']+)'\)/GetItemById\((\d+)\)/UnshareLink$") {
             if ($Body.shareId -eq $script:Fake.FailOn) { Fail 500 }
             [void]$script:Fake.Gone.Add($Body.shareId)
-            # Done, but the answer never arrives.
-            if ($Body.shareId -eq $script:Fake.Lost) { Fail 504 }
+            # Done, but the answer never arrives (and, if asked, Stop is pressed at that moment).
+            if ($Body.shareId -eq $script:Fake.Lost) {
+                if ($script:Fake.StopOnLost) { Set-Content -LiteralPath $script:StopFile -Value 'stop' }
+                Fail 504
+            }
             # Removing a link changes the file, so it turns up in its library's list of changes.
             $script:Fake.Changes["drv-$($Matches[1])"] = @($script:Fake.Changes["drv-$($Matches[1])"]) + [int]$Matches[2]
             return [pscustomobject]@{}
@@ -311,7 +314,36 @@ try {
     Invoke-CrFix -Folder $lost -Step Remove
     $lr = @((Read-CrJson (Join-Path $lost 'removed.json')).links | Where-Object shareId -EQ 'l-lost')
     Check "a lost answer is checked, not counted as failed ($($lr.result))" ($lr.Count -eq 1 -and $lr[0].result -eq 'Removed')
+
+    # The same, but Stop is pressed before it can check: written down as not known, never as not removed.
+    $fake.Links["$od|D1|7"] = @((Link 'l-lost' 2 1 $old), (Link 'l-after' 2 1 $old))
+    [void]$fake.Gone.Remove('l-lost')
+    $fake.StopOnLost = $true
+    $lost2 = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options ([pscustomobject]@{ links = @('Organization'); age = 'Any'; fullCheck = $true })
+    Invoke-CrFix -Folder $lost2 -Step Preview
+    Invoke-CrFix -Folder $lost2 -Step Remove
+    $l2 = @{}; foreach ($x in (Read-CrJson (Join-Path $lost2 'removed.json')).links) { $l2[$x.shareId] = $x.result }
+    Check "stopped while checking: not known, and the rest not reached ($($l2['l-lost']) / $($l2['l-after']))" ($l2['l-lost'] -like 'Not known*' -and $l2['l-after'] -like 'Not removed: it stopped*' -and (Read-CrProgress $lost2).state -eq 'Cancelled')
+    $fake.StopOnLost = $false
     $fake.Lost = $null
+
+    # ── Stop pressed before a single link is touched: the preview is still there to remove from ──
+    $fake.Links["$od|D1|7"] = @((Link 'l-early' 2 1 $old))
+    $early = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options ([pscustomobject]@{ links = @('Organization'); age = 'Any'; fullCheck = $true })
+    Invoke-CrFix -Folder $early -Step Preview
+    New-Item -ItemType File -Path (Join-Path $early 'stop.request') | Out-Null
+    Invoke-CrFix -Folder $early -Step Remove
+    $l = Get-CrLatestFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com'
+    Check 'stopped before touching anything: no record, preview kept' (-not (Test-Path (Join-Path $early 'removed.json')) -and $l.Folder -eq $early -and $l.Previewed -and (Read-CrProgress $early).state -eq 'Cancelled' -and -not $fake.Gone.Contains('l-early'))
+    Remove-Item -LiteralPath (Join-Path $early 'stop.request')
+    Invoke-CrFix -Folder $early -Step Remove
+    Check 'and Remove can be pressed again' ($fake.Gone.Contains('l-early') -and (Read-CrProgress $early).state -eq 'Completed')
+
+    # ── "Shared with" says when SharePoint named only some of the people on a link ──
+    $many = Link 'l-many' 6 2 $old -members 'a@contoso.com', 'b@contoso.com'
+    $many.totalLinkMembersCount = 5
+    $rec = New-CrLinkRecord -Site $sites[2] -ListId 'D1' -ItemId 7 -Url 'x' -Link ([pscustomobject]$many | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
+    Check "the rest are counted ($($rec.sharedWith))" ($rec.sharedWith -eq 'a@contoso.com; b@contoso.com; and 3 more')
 
     # ── A Remove that stops before removing anything keeps its preview ──
     $unstarted = New-CrFix -ResultsRoot $work -Tenant 'contoso.onmicrosoft.com' -Sites @($sites[2]) -Options $wide180
@@ -332,6 +364,9 @@ try {
     Check "the Teams list is read once, then kept (read $reads time(s))" ($reads -eq 1 -and $m2['https://contoso.sharepoint.com/sites/finance-payroll'] -eq 'Channel')
     $null = Get-CrTeamsMarks -Settings $tenantSettings -ResultsRoot $work -Refresh
     Check 'Refresh reads it again' ((& $module { $script:MarkReads }) -eq 2)
+    & $module { function script:Read-CrTeamsMarks { throw 'The admin center is unreachable.' } }
+    $m3 = Get-CrTeamsMarks -Settings $tenantSettings -ResultsRoot $work -Refresh
+    Check 'a refresh that fails keeps the list from before' ($m3['https://contoso.sharepoint.com/sites/finance'] -eq 'Team')
     $marked = @([pscustomobject]@{ url = 'https://contoso.sharepoint.com/sites/Finance-Payroll'; kind = 'SharePoint' }, [pscustomobject]@{ url = 'https://contoso.sharepoint.com/sites/other'; kind = 'SharePoint' })
     Add-CrTeamsKinds $marked $m1
     Check 'marks match whatever the case of the address' ((Get-CrSitePlace $marked[0]) -eq 'Channel' -and (Get-CrSitePlace $marked[1]) -eq 'SharePoint')

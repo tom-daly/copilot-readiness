@@ -31,7 +31,7 @@ function Read-CrTenantSettings {
 function Get-CrTenantSettingsPath {
     <# Where a tenant's settings are kept once read: a file in the results folder, which the scan lists ignore. #>
     param([Parameter(Mandatory)] [string] $ResultsRoot, [Parameter(Mandatory)] [string] $Tenant)
-    Join-Path $ResultsRoot ("tenant-settings-{0}.json" -f ($Tenant -replace '[^A-Za-z0-9.-]', '_'))
+    Join-Path $ResultsRoot ("tenant-settings-{0}.json" -f (Get-CrTenantFileName $Tenant))
 }
 
 function ConvertTo-CrPlainSettings {
@@ -62,33 +62,11 @@ function Get-CrSavedTenantSettings {
     #>
     param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ResultsRoot, [switch] $Refresh)
     $path = Get-CrTenantSettingsPath $ResultsRoot $Settings.tenant
-    $saved = $null
-    if (Test-Path -LiteralPath $path) {
-        try {
-            $file = Read-CrJson $path
-            $values = [ordered]@{}
-            foreach ($p in $file.values.PSObject.Properties) { $values[$p.Name] = $p.Value }
-            $saved = [pscustomobject]@{
-                View    = Get-CrTenantSettingsView $values -SharePointUrl $Settings.sharePointUrl
-                ReadAt  = [DateTimeOffset]::Parse($file.readAt, [Globalization.CultureInfo]::InvariantCulture)
-                Problem = $null
-            }
-        }
-        catch { $saved = $null }   # a copy that can't be read is read again from the tenant
-    }
-    if ($saved -and -not $Refresh) { return $saved }
-
     try {
-        $values = ConvertTo-CrPlainSettings (Read-CrTenantSettings $Settings)
-        $now = [DateTimeOffset]::UtcNow
-        New-Item -ItemType Directory -Path $ResultsRoot -Force | Out-Null
-        Write-CrJson $path ([pscustomobject][ordered]@{ tenant = $Settings.tenant; readAt = $now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); values = [pscustomobject]$values })
-        [pscustomobject]@{ View = Get-CrTenantSettingsView $values -SharePointUrl $Settings.sharePointUrl; ReadAt = $now; Problem = $null }
+        $kept = Get-CrKeptCopy -Path $path -Refresh:$Refresh -Read { ConvertTo-CrPlainSettings (Read-CrTenantSettings $Settings) }
+        [pscustomobject]@{ View = Get-CrTenantSettingsView (ConvertTo-CrDictionary $kept.Value) -SharePointUrl $Settings.sharePointUrl; ReadAt = $kept.ReadAt; Problem = $kept.Problem }
     }
-    catch {
-        if ($saved) { $saved.Problem = $_.Exception.Message; return $saved }
-        [pscustomobject]@{ View = $_.Exception.Message; ReadAt = $null; Problem = $null }
-    }
+    catch { [pscustomobject]@{ View = $_.Exception.Message; ReadAt = $null; Problem = $null } }
 }
 
 function Get-CrTenantSettingsView {

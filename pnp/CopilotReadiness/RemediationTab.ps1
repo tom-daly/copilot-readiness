@@ -434,7 +434,8 @@ function Add-CrRemediationTab {
             else {
                 # It stopped before removing anything (say signing in failed): the preview is still there to try again.
                 $listTools.Visible = $st.ToRemove -gt 0
-                $status.Text = "Remove didn't start: $(if ($p.error) { $p.error } else { 'it stopped before removing anything' }). Nothing was removed; press Remove to try again."
+                $status.Text = if ($p.state -eq 'Cancelled') { 'Stopped before removing anything. Nothing was removed; press Remove to start again.' }
+                else { "Remove didn't start: $(if ($p.error) { $p.error } else { 'it stopped before removing anything' }). Nothing was removed; press Remove to try again." }
             }
         }
         & $update
@@ -447,6 +448,16 @@ function Add-CrRemediationTab {
             $p = Read-CrProgress $st.Folder
             if (-not $p) { return }
             if ($p.state -in 'Completed', 'Cancelled', 'Failed') { $timer.Stop(); & $showDone $p; return }
+            # Still this window's own 'Starting': the step hasn't written yet. Give it a minute to start.
+            if ($p.state -eq 'Starting' -and [int]$p.pid -eq $PID) {
+                $since = [DateTimeOffset]::MinValue
+                $young = [DateTimeOffset]::TryParse("$($p.updatedAt)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$since) -and
+                    $since -gt [DateTimeOffset]::UtcNow.AddMinutes(-1)
+                if ($young) { $status.Text = 'Starting...'; return }
+                $timer.Stop()
+                & $showDone ([pscustomobject]@{ state = 'Failed'; error = "it didn't start. The log in its folder says why."; problems = @() })
+                return
+            }
             if (-not (Test-CrScanRunning $st.Folder)) {
                 # The hidden window ended without saying so.
                 $timer.Stop()

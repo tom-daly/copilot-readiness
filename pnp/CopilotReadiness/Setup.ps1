@@ -152,9 +152,12 @@ function Remove-CrAppFromTenant {
     param([Parameter(Mandatory)] [scriptblock] $Graph, [Parameter(Mandatory)] [string] $AppId)
     $parsed = [guid]::Empty
     if (-not [guid]::TryParse($AppId, [ref]$parsed)) { throw "'$AppId' isn't an app ID." }
-    $apps = @((& $Graph GET "applications?`$filter=appId eq '$AppId'&`$select=id,appId,displayName").value)
-    foreach ($a in $apps) { $null = & $Graph DELETE "applications/$($a.id)" }
-    $apps.Count
+    # An app ID is unique in a tenant, so there is one app at most: one delete, which either happens or
+    # doesn't, so a failure always means nothing in the tenant was changed.
+    $app = @((& $Graph GET "applications?`$filter=appId eq '$AppId'&`$select=id,appId,displayName").value) | Select-Object -First 1
+    if (-not $app) { return 0 }
+    $null = & $Graph DELETE "applications/$($app.id)"
+    1
 }
 
 function Uninstall-CrApp {

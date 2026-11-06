@@ -16,6 +16,9 @@ $script:NoShareId = '00000000-0000-0000-0000-000000000000'
 # How often Remove saves how far it has got for the window (every link's result is written as it happens).
 $script:ProgressEverySeconds = 2
 
+# How many of the people on one link are named in "Shared with"; past that it says how many more.
+$script:MaxLinkMembers = 100
+
 # The words each link type is shown with, in the window and the spreadsheets.
 $script:LinkTypeWords = [ordered]@{
     Anyone         = 'Anyone'
@@ -79,29 +82,13 @@ function Get-CrTeamsMarks {
       address -> mark.
     #>
     param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ResultsRoot, [switch] $Refresh)
-    $path = Join-Path $ResultsRoot ("teams-sites-{0}.json" -f ($Settings.tenant -replace '[^A-Za-z0-9.-]', '_'))
-    $savedMarks = $null
-    if (Test-Path -LiteralPath $path) {
-        try {
-            $saved = Read-CrJson $path
-            $readAt = [DateTimeOffset]::Parse($saved.readAt, [Globalization.CultureInfo]::InvariantCulture)
-            $savedMarks = @{}
-            foreach ($p in $saved.marks.PSObject.Properties) { $savedMarks[$p.Name] = "$($p.Value)" }
-            if (-not $Refresh -and $readAt -gt [DateTimeOffset]::UtcNow.AddDays(-$script:TeamsMarksDays)) { return $savedMarks }
-        }
-        catch { $savedMarks = $null }   # unreadable: read again
-    }
-    try { $marks = Read-CrTeamsMarks $Settings }
-    catch {
-        # Can't be read just now: the last copy, however old, is better than none.
-        if ($savedMarks) { Write-Host "Couldn't read which sites belong to Teams just now, so using the list from before: $($_.Exception.Message)"; return $savedMarks }
-        throw
-    }
-    New-Item -ItemType Directory -Path $ResultsRoot -Force | Out-Null
-    Write-CrJson $path ([pscustomobject][ordered]@{ tenant = $Settings.tenant; readAt = [DateTimeOffset]::UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); marks = [pscustomobject]$marks })
-    $result = @{}
-    foreach ($k in $marks.Keys) { $result[$k] = $marks[$k] }
-    $result
+    $path = Join-Path $ResultsRoot ("teams-sites-{0}.json" -f (Get-CrTenantFileName $Settings.tenant))
+    $kept = Get-CrKeptCopy -Path $path -MaxAgeDays $script:TeamsMarksDays -Refresh:$Refresh -Read { Read-CrTeamsMarks $Settings }
+    if ($kept.Problem) { Write-Host "Couldn't read which sites belong to Teams just now, so using the list from before: $($kept.Problem)" }
+    $marks = @{}
+    $read = ConvertTo-CrDictionary $kept.Value
+    foreach ($k in $read.Keys) { $marks[$k] = "$($read[$k])" }
+    $marks
 }
 
 function Add-CrTeamsKinds {
@@ -287,13 +274,11 @@ function Start-CrBackgroundFix {
     # Each run its own log, so running a step again never writes over the record of an earlier one.
     $log = Join-Path $Folder "$($Step.ToLowerInvariant())-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     $arguments = '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$StartScript`"", '-RunFix', "`"$Folder`"", '-FixStep', $Step, '-FixPace', $Pace, '-SettingsPath', "`"$SettingsPath`""
-    $process = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $arguments -WindowStyle Hidden -PassThru `
+    # 'Starting' is written before the step is launched, as this window's, and the step then writes its
+    # own; nothing here writes after it starts, so its own report (even an error straight away) always stands.
+    Write-CrFixProgress -Folder $Folder -Step $Step -State Starting
+    Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $arguments -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "$log.log" -RedirectStandardError "$log-errors.log"
-    # Until the step itself reports, the window shows it signing in. If it has already reported
-    # (say it failed straight away), that is left as it is, so the real reason is shown.
-    $p = Read-CrProgress $Folder
-    if (-not $p -or [int]$p.pid -ne $process.Id) { Write-CrFixProgress -Folder $Folder -Step $Step -State Starting -Process $process }
-    $process
 }
 
 function Update-CrFixPace {
@@ -382,9 +367,14 @@ function Get-CrLatestFix {
 # ── Finding links ───────────────────────────────────────────────────────────
 
 function Get-CrSharingInfo {
-    <# SharePoint's sharing details of one file, folder or list item, with its links. #>
+    <#
+      SharePoint's sharing details of one file, folder or list item, with its links and up to
+      MaxLinkMembers of the people on each (each link also says how many there are in all).
+      SharePoint asks for this as a POST, but it only reads, so it is sent again after a network error.
+    #>
     param([Parameter(Mandatory)] [string] $SiteUrl, [Parameter(Mandatory)] [string] $ListId, [Parameter(Mandatory)] [int] $ItemId)
-    Invoke-CrPost "$SiteUrl/_api/web/lists(guid'$ListId')/GetItemById($ItemId)/GetSharingInformation?`$expand=permissionsInformation" @{ request = @{ maxPrincipalsToReturn = 10 } }
+    Invoke-CrPost "$SiteUrl/_api/web/lists(guid'$ListId')/GetItemById($ItemId)/GetSharingInformation?`$expand=permissionsInformation" `
+        @{ request = @{ maxPrincipalsToReturn = 10; maxLinkMembersToReturn = $script:MaxLinkMembers } } -SafeToRetry
 }
 
 function Get-CrItemLinks {
@@ -417,6 +407,10 @@ function New-CrLinkRecord {
     $created = ConvertTo-CrLinkDate "$($d.Created)"
     $people = @(@($Link.linkMembers) + @($d.Invitations | ForEach-Object { $_.invitee }) | Where-Object { $_ } |
             ForEach-Object { if ($_.email) { "$($_.email)" } elseif ($_.name) { "$($_.name)" } } | Where-Object { $_ } | Select-Object -Unique)
+    # SharePoint names only so many of the people on a link; it says how many there are in all, so the rest are counted.
+    $named = @($Link.linkMembers | Where-Object { $_ }).Count
+    $more = [int]$Link.totalLinkMembersCount - $named
+    if ($more -gt 0) { $people += "and $more more" }
     $by = if ($d.CreatedBy) { if ($d.CreatedBy.email) { "$($d.CreatedBy.email)" } else { "$($d.CreatedBy.name)" } } else { '' }
     [pscustomobject][ordered]@{
         site       = "$($Site.url)".TrimEnd('/')
@@ -474,7 +468,7 @@ function Get-CrLinkCachePath {
     <# Where what a preview found on a site is kept for the next preview: one file per site, under the results folder. #>
     param([Parameter(Mandatory)] [string] $ResultsRoot, [Parameter(Mandatory)] [string] $Tenant, [Parameter(Mandatory)] [string] $SiteUrl)
     $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($SiteUrl.TrimEnd('/').ToLowerInvariant())))
-    Join-Path $ResultsRoot (Join-Path 'link-cache' (Join-Path ($Tenant -replace '[^A-Za-z0-9.-]', '_') "$($hash.Substring(0, 24).ToLowerInvariant()).json"))
+    Join-Path $ResultsRoot (Join-Path 'link-cache' (Join-Path (Get-CrTenantFileName $Tenant) "$($hash.Substring(0, 24).ToLowerInvariant()).json"))
 }
 
 function Get-CrLinkCacheTime {
@@ -544,6 +538,14 @@ function Get-CrSiteLinkInventory {
     $bookmarks = [ordered]@{}
     $tally = @{ Changed = 0; ByChanges = 0; InFull = 0; GraphSite = $null; Resync = 0 }
     $lists = Get-CrAll "$url/_api/web/lists?`$select=Id,Title,Hidden,ItemCount,BaseType&`$filter=Hidden eq false"
+    # The saved links by library, sorted once, rather than going through them all for each library.
+    $savedByList = @{}
+    foreach ($old in @($Saved.links)) {
+        if (-not $old) { continue }
+        $k = "$($old.listId)"
+        if (-not $savedByList.ContainsKey($k)) { $savedByList[$k] = [System.Collections.Generic.List[object]]::new() }
+        $savedByList[$k].Add($old)
+    }
     foreach ($list in $lists) {
         if ([int]$list.BaseType -notin 0, 1) { continue }
         $listId = "$($list.Id)"
@@ -556,7 +558,7 @@ function Get-CrSiteLinkInventory {
                 # By item number; the library's own top folder has none and carries no links.
                 $touched = [ordered]@{}
                 foreach ($it in $changes.Items) { $n = "$($it.sharepointIds.listItemId)"; if ($n) { $touched[$n] = $it } }
-                $kept = @(foreach ($old in @($Saved.links)) { if ($old -and "$($old.listId)" -eq $listId -and -not $touched.Contains("$($old.itemId)")) { $old } })
+                $kept = @(foreach ($old in @($savedByList[$listId])) { if ($old -and -not $touched.Contains("$($old.itemId)")) { $old } })
                 # Microsoft's list doesn't always say which item a deleted file was, so the files whose links
                 # are carried over are checked to still be there: a few dozen to a request.
                 $alive = [System.Collections.Generic.HashSet[string]]::new()
@@ -796,6 +798,13 @@ function Invoke-CrLinkRemove {
         $tried = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($d in $done) { [void]$tried.Add((Get-CrLinkKey $d)) }
         $attempted = $done.Count - $skipped
+        # Stopped, or failed, before dealing with a single link: nothing was changed, so no record is
+        # written and the preview stays as it was, for Remove to be pressed again.
+        if ($attempted -eq 0 -and $State -ne 'Completed') {
+            try { Write-CrFixProgress -Folder $Folder -Step Remove -State $State -Total $todo.Count -Done 0 -Counts $counts -ErrorText $ErrorText }
+            catch { Write-Host "$(Get-Date -Format s) Couldn't save progress.json: $($_.Exception.Message)" }
+            return
+        }
         foreach ($link in $todo) {
             if ($tried.Contains((Get-CrLinkKey $link))) { continue }
             $copy = $link | Select-Object *
@@ -826,6 +835,7 @@ function Invoke-CrLinkRemove {
     $journal.AutoFlush = $true
     # Progress is saved every couple of seconds, as the preview does, not for every file.
     $lastSaved = [DateTime]::MinValue
+    $stopAfter = $false
     try {
         foreach ($group in $todo | Group-Object site, listId, itemId) {
             $first = $group.Group[0]
@@ -853,17 +863,20 @@ function Invoke-CrLinkRemove {
                         if ($_.Exception -is [System.OperationCanceledException]) { throw }
                         $why = $_.Exception.Message
                         # The answer can be lost after SharePoint has done it (a timeout, say): look before calling it failed.
+                        # Stop pressed while looking: the result is written down as not known, then it stops.
                         $stillThere = try { @(Get-CrItemLinks (Get-CrSharingInfo $link.site $link.listId $link.itemId) | ForEach-Object { "$($_.linkDetails.ShareId)" }) -contains $link.shareId }
-                        catch { if ($_.Exception -is [System.OperationCanceledException]) { throw }; $true }
-                        if ($stillThere) { "Failed: $why" } else { 'Removed' }
+                        catch { if ($_.Exception -is [System.OperationCanceledException]) { $stopAfter = $true; $null } else { $true } }
+                        if ($stopAfter) { "Not known: SharePoint's answer was lost and it stopped before it could check. Look at this file's sharing" }
+                        elseif ($stillThere) { "Failed: $why" } else { 'Removed' }
                     }
                 }
-                switch -Wildcard ($result) { 'Removed' { $counts.removed++ } 'Already gone' { $counts.gone++ } 'Failed*' { $counts.failed++ } }
+                switch -Wildcard ($result) { 'Removed' { $counts.removed++ } 'Already gone' { $counts.gone++ } 'Failed*' { $counts.failed++ } 'Not known*' { $counts.failed++ } }
                 Write-Host "$(Get-Date -Format s) $result  $($link.url)"
                 $copy = $link | Select-Object *
                 $copy | Add-Member -NotePropertyName result -NotePropertyValue $result
                 $done.Add($copy)
                 $journal.WriteLine((ConvertTo-Json -InputObject $copy -Compress -Depth 5))
+                if ($stopAfter) { throw [System.OperationCanceledException]::new('Stopped.') }
             }
         }
         $ended = 'Completed'

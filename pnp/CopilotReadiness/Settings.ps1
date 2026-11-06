@@ -64,6 +64,52 @@ function ConvertTo-CrTenantName {
     if ($Tenant -and $Tenant -notmatch '\.') { "$Tenant.onmicrosoft.com" } else { $Tenant }
 }
 
+function Get-CrTenantFileName {
+    <# A tenant's name as it goes into a file name: contoso.onmicrosoft.com stays, anything odd becomes _. #>
+    param([Parameter(Mandatory)] [string] $Tenant)
+    $Tenant -replace '[^A-Za-z0-9.-]', '_'
+}
+
+function ConvertTo-CrDictionary {
+    <# Name -> value, whether it comes as a dictionary or as an object read back from JSON. #>
+    param($Value)
+    if ($Value -is [System.Collections.IDictionary]) { return $Value }
+    $d = [ordered]@{}
+    if ($Value) { foreach ($p in $Value.PSObject.Properties) { $d[$p.Name] = $p.Value } }
+    $d
+}
+
+function Get-CrKeptCopy {
+    <#
+      Something read from the tenant and kept in a file (in the results folder), so it isn't
+      read every time the window opens. The saved copy is used while it is younger than
+      MaxAgeDays (0: until -Refresh); otherwise Read runs and its answer is saved. If Read fails
+      and there is a saved copy, that copy is used however old, with Problem saying why; with no
+      saved copy, the error is thrown. Returns Value (as Read gave it, or as saved), ReadAt and Problem.
+    #>
+    param([Parameter(Mandatory)] [string] $Path, [Parameter(Mandatory)] [scriptblock] $Read, [int] $MaxAgeDays = 0, [switch] $Refresh)
+    $saved = $null
+    if (Test-Path -LiteralPath $Path) {
+        try {
+            $file = Read-CrJson $Path
+            if ($null -ne $file.value) {
+                $saved = [pscustomobject]@{ Value = $file.value; ReadAt = [DateTimeOffset]::Parse($file.readAt, [Globalization.CultureInfo]::InvariantCulture); Problem = $null }
+            }
+        }
+        catch { $saved = $null }   # a copy that can't be read is read again
+    }
+    if ($saved -and -not $Refresh -and ($MaxAgeDays -le 0 -or $saved.ReadAt -gt [DateTimeOffset]::UtcNow.AddDays(-$MaxAgeDays))) { return $saved }
+    try { $value = & $Read }
+    catch {
+        if ($saved) { $saved.Problem = $_.Exception.Message; return $saved }
+        throw
+    }
+    $now = [DateTimeOffset]::UtcNow
+    New-Item -ItemType Directory -Path (Split-Path $Path) -Force | Out-Null
+    Write-CrJson $Path ([pscustomobject][ordered]@{ readAt = $now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); value = $value })
+    [pscustomobject]@{ Value = $value; ReadAt = $now; Problem = $null }
+}
+
 function Get-CrTenantNames {
     <# The current tenant, then the others set up on this PC. #>
     param([Parameter(Mandatory)] $Settings)

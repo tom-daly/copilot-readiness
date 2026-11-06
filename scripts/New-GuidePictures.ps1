@@ -311,6 +311,10 @@ try {
     Save-Form $form '08-past-scans.png' @((Find-Control $form 'Open report'))
     $tabs.SelectedIndex = 2; Pump 1500
     Save-Form $form '09-tenant.png'
+    # The Remediation tab needs more height than the others, or its last age choice is cut off and
+    # the preview shows only two links; make the window taller for this one picture.
+    $screen = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $form.SetBounds($form.Left, $screen.Top, $form.Width, [Math]::Min($screen.Height, $form.Height + 260))
     $tabs.SelectedTab = $tabs.TabPages | Where-Object Text -EQ 'Remediation'; Pump 1200
     Save-Form $form '10-remediation.png' @((Find-Control $form 'Preview'))
     $form.Close(); $form.Dispose()

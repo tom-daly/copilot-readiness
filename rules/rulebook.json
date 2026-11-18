@@ -1,6 +1,6 @@
 {
   "about": "The Copilot Readiness rule book: every rule's check and severity, how scores are worked out, the thresholds the rules use, and the sites set aside on purpose (setAside: matched by the root web's WebTemplate, recorded as Skipped with the reason, no findings, no score). The scan reads this file, so change a rule here, not in the scan.",
-  "version": 3,
+  "version": 4,
 
   "checks": [
     {
@@ -49,7 +49,8 @@
       "check": "Oversharing",
       "appliesTo": ["SharePoint", "OneDrive"],
       "severity": "High",
-      "raisedWhen": "\"Everyone\" or \"Everyone except external users\" is granted on a site, library, folder or file, directly or inside a SharePoint group"
+      "groupBy": "principal",
+      "raisedWhen": "\"Everyone\" or \"Everyone except external users\" is granted on a site, library, folder or file, directly or inside a SharePoint group (one finding per site for each way it is granted, listing every place)"
     },
     {
       "id": "PublicGroup",
@@ -63,20 +64,22 @@
     {
       "id": "AnyoneLink",
       "name": "“Anyone” link",
-      "advice": "There is a sharing link that works for anyone who has it, with no sign-in needed. Whoever the link is forwarded to can open this content. Remove the link or replace it with one for specific people.",
+      "advice": "There are sharing links that work for anyone who has them, with no sign-in needed. Whoever a link is forwarded to can open the content. Remove the links or replace them with links for specific people.",
       "check": "Oversharing",
       "appliesTo": ["SharePoint", "OneDrive"],
       "severity": "High",
-      "raisedWhen": "An \"Anyone with the link\" sharing link exists"
+      "groupBy": "rule",
+      "raisedWhen": "An \"Anyone with the link\" sharing link exists (one finding per site, listing every place with one)"
     },
     {
       "id": "OrgWideLink",
       "name": "Company-wide link",
-      "advice": "There is a sharing link that works for everyone in your organization. Anyone who comes across it can open the content, and Copilot may show it to people it was never meant for. Replace it with a link for specific people.",
+      "advice": "There are sharing links that work for everyone in your organization. Anyone who comes across one can open the content, and Copilot may show it to people it was never meant for. Replace them with links for specific people.",
       "check": "Oversharing",
       "appliesTo": ["SharePoint", "OneDrive"],
       "severity": "Medium",
-      "raisedWhen": "A \"People in your organization\" sharing link exists"
+      "groupBy": "rule",
+      "raisedWhen": "A \"People in your organization\" sharing link exists (one finding per site, listing every place with one)"
     },
     {
       "id": "BroadFullControl",
@@ -99,12 +102,13 @@
     {
       "id": "GuestAccess",
       "name": "Guest has access",
-      "advice": "Someone from outside your organization has been given access here, directly or through a site group. Guests who can edit are rated High; guests who can only read are rated Medium. Check they still need it.",
+      "advice": "Someone from outside your organization has been given access, directly or through a site group. Every place they can reach on the site is listed under one finding. Guests who can edit anywhere are rated High; guests who can only read are rated Medium. Check they still need it.",
       "check": "ExternalGuests",
       "appliesTo": ["SharePoint", "OneDrive"],
       "severity": "Medium",
       "severityWhenCanEdit": "High",
-      "raisedWhen": "A guest account is granted access directly or through a site group"
+      "groupBy": "principal",
+      "raisedWhen": "A guest account is granted access directly or through a site group (one finding per guest per site, listing every place)"
     },
     {
       "id": "GuestInGroup",
@@ -177,8 +181,9 @@
   },
 
   "finding": {
-    "fields": ["id", "check", "rule", "severity", "siteId", "siteUrl", "path", "objectType", "principal", "principalLogin", "permission", "detail", "verifiedAt"],
-    "objectTypes": ["Site", "Subsite", "Library", "List", "Folder", "File", "Item", "Group"],
-    "id": "The first 24 characters, lower case, of the hex SHA-256 of the UTF-8 text lower(siteId)|lower(path)|rule|lower(principalLogin). The same issue gets the same id in every scan, so two scans can be compared."
+    "fields": ["id", "check", "rule", "severity", "siteId", "siteUrl", "path", "objectType", "principal", "principalLogin", "permission", "detail", "verifiedAt", "places"],
+    "objectTypes": ["Site", "Subsite", "Library", "List", "Folder", "File", "Item", "Group", "Several"],
+    "id": "The first 24 characters, lower case, of the hex SHA-256 of the UTF-8 text lower(siteId)|lower(path)|rule|lower(principalLogin). A grouped finding uses * for the path. The same issue gets the same id in every scan, so two scans can be compared.",
+    "grouping": "Every finding of a rule with groupBy is gathered into one per site: per rule and principalLogin for groupBy \"principal\", per rule for groupBy \"rule\" (its principalLogin is then empty). places lists each place it was found (path, objectType, severity, permission, detail), worst first then by path; the same place found twice keeps the more serious. The finding takes the severity and permission of its worst place. With one place it keeps that place's path, objectType and detail. With more, objectType is Several, path is the deepest folder, library, list or subsite holding them all (empty when that is the site itself, or a place is the whole site), and detail counts the places in words, e.g. \"2 folders and 101 files\"."
   }
 }

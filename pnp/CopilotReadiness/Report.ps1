@@ -28,36 +28,39 @@ function Export-CrResults {
     $rules = @{}
     foreach ($r in $book.rules) { $rules[$r.id] = $r }
 
-    # Excel opens UTF-8 with a byte order mark without mangling accents. The same rows go in the report's Table view.
-    $findingRows = @($sorted | ForEach-Object {
-        [pscustomobject][ordered]@{
-            'Severity'     = $_.severity
-            'Area'         = $checkNames[$_.check]
-            'Issue'        = $rules[$_.rule].name
-            'Site'         = $titles[$_.siteId]
-            'Site URL'     = $_.siteUrl
-            'Kind'         = $kinds[$_.siteId]
-            'Location'     = Get-CrItemPlace $_
-            'Type'         = $_.objectType
-            'Who'          = $_.principal
-            'Permission'   = $_.permission
-            'Detail'       = $_.detail
-            'What to do'   = $rules[$_.rule].advice
-            'Finding ID'   = $_.id
-            'Checked at'   = $_.verifiedAt
-            'Link'         = Get-CrItemUrl $_
-        }
-    })
-    $findingRows | Export-Csv -LiteralPath (Join-Path $Folder 'findings.csv') -NoTypeInformation -Encoding utf8BOM
-
+    # Excel opens UTF-8 with a byte order mark without mangling accents. One row per place a finding was found,
+    # so a grouped finding has a row for each; its rows share its Finding ID. The same rows go in the report's Table view.
+    $findingRows = [System.Collections.Generic.List[object]]::new()
     # One spreadsheet per OneDrive with findings, so each owner can be handed just their own.
     $oneDriveRows = @{}
-    for ($i = 0; $i -lt $sorted.Count; $i++) {
-        $siteId = $sorted[$i].siteId
-        if ($kinds[$siteId] -ne 'OneDrive') { continue }
-        if (-not $oneDriveRows.ContainsKey($siteId)) { $oneDriveRows[$siteId] = [System.Collections.Generic.List[object]]::new() }
-        $oneDriveRows[$siteId].Add($findingRows[$i])
+    foreach ($f in $sorted) {
+        foreach ($p in Get-CrFindingPlaces $f) {
+            $row = [pscustomobject][ordered]@{
+                'Severity'     = $f.severity
+                'Area'         = $checkNames[$f.check]
+                'Issue'        = $rules[$f.rule].name
+                'Site'         = $titles[$f.siteId]
+                'Site URL'     = $f.siteUrl
+                'Kind'         = $kinds[$f.siteId]
+                'Location'     = Get-CrItemPlace $p
+                'Type'         = $p.objectType
+                'Who'          = $f.principal
+                'Permission'   = $p.permission
+                'Detail'       = $p.detail
+                'What to do'   = $rules[$f.rule].advice
+                'Finding ID'   = $f.id
+                'Checked at'   = $f.verifiedAt
+                'Link'         = Get-CrItemUrl $p
+            }
+            $findingRows.Add($row)
+            if ($kinds[$f.siteId] -ne 'OneDrive') { continue }
+            if (-not $oneDriveRows.ContainsKey($f.siteId)) { $oneDriveRows[$f.siteId] = [System.Collections.Generic.List[object]]::new() }
+            $oneDriveRows[$f.siteId].Add($row)
+        }
     }
+    $findingRows = $findingRows.ToArray()
+    $findingRows | Export-Csv -LiteralPath (Join-Path $Folder 'findings.csv') -NoTypeInformation -Encoding utf8BOM
+
     $oneDriveFiles = @{}
     if ($oneDriveRows.Count) {
         $oneDriveFolder = Join-Path $Folder 'onedrives'
@@ -113,7 +116,7 @@ function Export-CrResults {
     # The Table view: the spreadsheets' own columns. Links say which column holds the address a cell opens;
     # Hidden columns start hidden (people can show them); Columns is used when a table has no rows.
     $tables = @(
-        [pscustomobject]@{ Id = 'findings'; Name = 'Findings'; File = 'findings.csv'; Rows = $findingRows
+        [pscustomobject]@{ Id = 'findings'; Name = 'Findings, by place'; File = 'findings.csv'; Rows = $findingRows
             Columns = @('Severity', 'Area', 'Issue', 'Site', 'Site URL', 'Kind', 'Location', 'Type', 'Who', 'Permission', 'Detail', 'What to do', 'Finding ID', 'Checked at', 'Link')
             Links = @{ Site = 'Site URL'; Location = 'Link' }; Hidden = @('Site URL', 'What to do', 'Finding ID', 'Checked at', 'Link') },
         [pscustomobject]@{ Id = 'sites'; Name = 'Sites'; File = 'sites.csv'; Rows = $siteRows
@@ -167,10 +170,23 @@ function Get-CrLibraryName {
     $web = @($parts | Select-Object -SkipLast 1 | Where-Object { $_ -and $_ -ne 'Lists' })
     if ($web.Count) { "$name (in $($web -join '/'))" } else { $name }
 }
-function Get-CrItemPlace {
-    <# Where a finding is, in words: the whole site, the group, or the path inside the site. #>
+function Get-CrFindingPlaces {
+    <# Each place a finding was found, shaped like a finding (siteUrl, path, objectType, permission, detail). Ungrouped findings, and results saved before grouping, are their own one place. #>
     param($Finding)
-    if (-not $Finding.path) { if ($Finding.objectType -eq 'Group') { return 'Microsoft 365 group' } else { return 'Whole site' } }
+    if (-not ($Finding.PSObject.Properties['places'] -and $Finding.places)) { return , $Finding }
+    foreach ($p in $Finding.places) {
+        [pscustomobject]@{ siteUrl = $Finding.siteUrl; path = "$($p.path)"; objectType = $p.objectType; severity = $p.severity; permission = $p.permission; detail = $p.detail }
+    }
+}
+
+function Get-CrItemPlace {
+    <# Where a finding is, in words: the whole site, the group, across the site, or the path inside the site. #>
+    param($Finding)
+    if (-not $Finding.path) {
+        if ($Finding.objectType -eq 'Group') { return 'Microsoft 365 group' }
+        if ($Finding.objectType -eq 'Several') { return 'Across the site' }
+        return 'Whole site'
+    }
     $sitePath = [uri]::UnescapeDataString(([uri]$Finding.siteUrl).AbsolutePath).TrimEnd('/')
     $place = if ($sitePath -and $Finding.path.StartsWith("$sitePath/", [StringComparison]::OrdinalIgnoreCase)) { $Finding.path.Substring($sitePath.Length + 1) } else { $Finding.path }
     if ($place -match '^(.*)/DispForm\.aspx\?ID=(\d+)$') { return "$($Matches[1]), item $($Matches[2])" }
@@ -188,6 +204,8 @@ function New-CrReportHtml {
     # Past these, a section points to findings.csv rather than listing everything.
     $maxPerIssue = 300
     $maxPerSite = 200
+    # Past this, a grouped finding's list of places points to findings.csv.
+    $maxPlaces = 200
 
     $book = Get-CrRuleBook
     function Enc([object] $s) { [System.Net.WebUtility]::HtmlEncode("$s") }
@@ -226,8 +244,20 @@ function New-CrReportHtml {
         }
         $what = if ($ShowSite) { '' } else { "<td><span class='pill $($f.severity)'>$($f.severity)</span> $(Enc $rules[$f.rule].name)</td>" }
         $detail = if ($f.detail) { "<div class='muted'>$(Enc $f.detail)</div>" } else { '' }
+        # A grouped finding links to the folder holding its places, and lists each one under it.
+        $places = @(Get-CrFindingPlaces $f)
+        $list = if ($places.Count -gt 1) {
+            "<details class='places'><summary>Show all $($places.Count) places</summary><table><tbody>" +
+            (($places | Select-Object -First $maxPlaces | ForEach-Object {
+                        $note = if ($_.detail) { " <span class='muted'>$(Enc $_.detail)</span>" } else { '' }
+                        "<tr><td class='path'><a href='$(Enc (Get-CrItemUrl $_))' target='_blank' rel='noopener'>$(Enc (Get-CrItemPlace $_))</a>$note</td><td>$(Enc $_.permission)</td></tr>"
+                    }) -join '') + '</tbody></table>' +
+            $(if ($places.Count -gt $maxPlaces) { "<div class='more'>Showing the first $maxPlaces of $($places.Count). <a href='findings.csv' download>findings.csv</a> has them all.</div>" }) +
+            '</details>'
+        }
+        else { '' }
         "<tr data-sev='$($f.severity)' data-check='$($f.check)' data-kind='$(if ($site.kind) { $site.kind } else { 'SharePoint' })'>$what$siteCell" +
-        "<td class='path'><a href='$(Enc (Get-CrItemUrl $f))' target='_blank' rel='noopener'>$(Enc (Get-CrItemPlace $f))</a>$detail</td>" +
+        "<td class='path'><a href='$(Enc (Get-CrItemUrl $f))' target='_blank' rel='noopener'>$(Enc (Get-CrItemPlace $f))</a>$detail$list</td>" +
         "<td>$(Enc $f.principal)</td><td>$(Enc $f.permission)</td></tr>"
     }
 
@@ -295,6 +325,10 @@ tr:last-child td { border-bottom:0; }
 .path { word-break:break-word; }
 .badge { font-weight:700; min-width:34px; text-align:right; }
 .more { font-size:13px; color:var(--muted); margin-top:8px; }
+details.places { margin-top:4px; }
+details.places > summary { cursor:pointer; color:var(--accent); font-size:12px; }
+details.places table { margin-top:4px; font-size:12px; }
+details.places td { padding:3px 8px 3px 0; }
 .empty { color:var(--muted); font-size:13px; }
 @media print { .toolbar, .files, .views { display:none; } details.group { break-inside:avoid; } }
 .views { display:inline-flex; margin-top:24px; border:1px solid var(--line); border-radius:8px; overflow:hidden; }

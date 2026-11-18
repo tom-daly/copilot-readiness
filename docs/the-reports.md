@@ -10,7 +10,9 @@ The numbers at the top are your scores out of 100, and higher is more ready. Eac
 
 ## Find what to fix
 
-Every issue is listed two ways, by kind of issue and by site, with OneDrive in a part of its own. Each opens with a click and links straight to the site, library, folder or file. Search, the High, Medium and Low buttons and the SharePoint and OneDrive buttons narrow it down; clicking an area shows only its issues.
+Every issue is listed two ways, by kind of issue and by site, with OneDrive in a part of its own. Each opens with a click and links straight to the site, library, folder or file.
+
+When the same guest, the same "Everyone" access, or the same kind of sharing link turns up in many places on a site, it's one issue, not one per file. It says how many places, such as "2 folders and 101 files", links to the folder that holds them all, and **Show all** lists every place. It's rated by the most serious place: a guest who can edit anywhere is High. One decision usually settles it, such as whether that guest still needs access, so it counts once towards the score. Search, the High, Medium and Low buttons and the SharePoint and OneDrive buttons narrow it down; clicking an area shows only its issues.
 
 The **Table** view shows the same rows as the spreadsheets below, as tables: click a column heading to sort, type or pick under a heading to filter, show or hide columns, and **Download these rows** to save just what you see.
 
@@ -25,7 +27,7 @@ Open the **Past scans** tab, pick a scan and press **Open report**, or double-cl
 Each scan gets its own folder under `results`, and a new scan never changes an earlier one. A newer version of the program keeps using the same `results` folder, even if it's in the older version's folder:
 
 - `report.html`: the report. It links to the files below, so keep them together.
-- `findings.csv`: every finding with what to do about it. Opens in Excel.
+- `findings.csv`: every finding with what to do about it, one row for each place it was found. Rows with the same Finding ID are one issue. Opens in Excel.
 - `onedrives` folder: one spreadsheet per OneDrive that has findings, named after its owner, so each person can be given just their own. Same columns as `findings.csv`, and the report links to each one.
 - `sites.csv`: every site with its score.
 - `unique-permissions.csv` (Standard and Deep): every file, folder and list item on a SharePoint site that has its own permissions, with a link to it and, after a Deep scan, who has access. The report lists them by site too, so you can decide whether each should keep its own permissions. They don't change the score; each library with any already loses a point.

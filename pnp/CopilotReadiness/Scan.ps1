@@ -14,8 +14,6 @@ $script:SystemLibraries = 'Style Library', 'Form Templates', 'FormServerTemplate
 
 # List items read per request when walking a library or list, and the most findings kept for one of them.
 $script:ItemPageSize = 2000
-$script:MaxFindingsPerLibrary = 500
-
 $script:Labels = $null
 
 # ── How far along a site's scan is ──────────────────────────────────────────
@@ -674,10 +672,8 @@ function Invoke-CrLibraryScan {
                         -Assignments $assignments -Scope Item -Groups $LinkGroups -OwnersGroupId $null -SiteGroupId $null -Now $Now))
         }
 
-        # Keep the results readable on badly overshared libraries: past the cap, only the totals record it.
-        $room = [Math]::Max(0, $script:MaxFindingsPerLibrary - $findings.Count)
-        $rank = @{ High = 0; Medium = 1; Low = 2 }
-        $findings.AddRange([object[]]@($pageFindings | Sort-Object -Stable { $rank[$_.severity] } | Select-Object -First $room))
+        # Every one is kept; the site's findings are grouped once all its libraries are walked (Group-CrFindings).
+        $findings.AddRange([object[]]$pageFindings)
 
         if (-not $page.Next) { break }
         if ($OnPage) {
@@ -839,7 +835,8 @@ function Invoke-CrSiteScan {
         }
     }
 
-    $findings = @(Select-CrApplicable -Kind $kind -Findings @($byId.Values))
+    # The same guest, "Everyone" grant or kind of link across the site is one finding listing every place.
+    $findings = @(Group-CrFindings @(Select-CrApplicable -Kind $kind -Findings @($byId.Values)))
     $counts = New-CrCounts
     Add-CrCounts $counts $findings
     $totals = Get-CrSeverityTotals $counts

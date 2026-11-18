@@ -527,7 +527,9 @@ try {
 
     foreach ($file in 'report.html', 'findings.csv', 'sites.csv') { Check "$file written" (Test-Path (Join-Path $folder $file)) }
     $csv = Import-Csv (Join-Path $folder 'findings.csv')
-    Check 'findings.csv has a row per finding with advice' (@($csv).Count -eq @($findings).Count -and $csv[0].'What to do')
+    $placeCount = { param($list) (@($list | ForEach-Object { [Math]::Max(1, @($_.places).Count) }) | Measure-Object -Sum).Sum }
+    Check "findings.csv has a row per place each finding was found, with advice (got $(@($csv).Count), expected $(& $placeCount $findings))" (@($csv).Count -eq (& $placeCount $findings) -and $csv[0].'What to do' -and
+        @($csv.'Finding ID' | Sort-Object -Unique).Count -eq @($findings).Count)
     $html = Get-Content (Join-Path $folder 'report.html') -Raw
     Check 'report shows the score and the rule names' ($html.Contains(">$($scan.score)</b>") -and $html.Contains('Open to everyone'))
     Check 'report shows the OneDrive score beside it' ($html.Contains("<b>85</b><span>out of 100</span></div><div>OneDrive</div>") -and $html.Contains('<div>SharePoint sites</div>'))
@@ -536,7 +538,7 @@ try {
     $oneDriveCsv = Join-Path $folder "onedrives\$($oneDrive.title).csv"
     $oneDriveFindings = @($findings | Where-Object siteId -EQ $oneDrive.siteId)
     Check "a OneDrive gets its own CSV with only its findings (expected $($oneDriveFindings.Count) rows)" (
-        (Test-Path -LiteralPath $oneDriveCsv) -and $oneDriveFindings.Count -gt 0 -and @(Import-Csv -LiteralPath $oneDriveCsv).Count -eq $oneDriveFindings.Count -and -not (@(Import-Csv -LiteralPath $oneDriveCsv) | Where-Object 'Site URL' -NE $oneDrive.url))
+        (Test-Path -LiteralPath $oneDriveCsv) -and $oneDriveFindings.Count -gt 0 -and @(Import-Csv -LiteralPath $oneDriveCsv).Count -eq (& $placeCount $oneDriveFindings) -and -not (@(Import-Csv -LiteralPath $oneDriveCsv) | Where-Object 'Site URL' -NE $oneDrive.url))
     Check 'SharePoint sites do not get a file in the OneDrive folder' (@(Get-ChildItem -LiteralPath (Join-Path $folder 'onedrives') -File).Count -eq 1)
     Check "report links to the OneDrive's own CSV" ($html.Contains("<a href='onedrives/$([uri]::EscapeDataString("$($oneDrive.title).csv"))' download>"))
     $names = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)

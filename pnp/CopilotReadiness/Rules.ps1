@@ -334,6 +334,128 @@ function Get-CrBrokenInheritanceFinding {
         -Detail "$UniqueItems $(if ($UniqueItems -eq 1) { 'item has its' } else { 'items have their' }) own permissions"
 }
 
+# ── Grouping ────────────────────────────────────────────────────────────────
+
+function Get-CrPermissionRank {
+    <# How much a permission level allows, by its name, to pick the most a grouped finding grants. Names it doesn't know rank between edit and read. #>
+    param([string] $Name)
+    switch -Regex ("$Name") {
+        '^full control$' { return 6 }
+        '^design$' { return 5 }
+        '^edit$' { return 4 }
+        '^contribute$' { return 3 }
+        '^(read|view)$' { return 1 }
+        default { return 2 }
+    }
+}
+
+function Get-CrSharedPath {
+    <#
+      The deepest folder, library, list or subsite that holds every one of these paths, or
+      '' when that is the site itself or one of them is the whole site. A list item's
+      display form (…/DispForm.aspx?ID=7) counts as its list.
+    #>
+    param([Parameter(Mandatory)] [string] $SiteUrl, [string[]] $Paths = @())
+    $siteDepth = @([uri]::UnescapeDataString(([uri]$SiteUrl).AbsolutePath).Split('/', [StringSplitOptions]::RemoveEmptyEntries)).Count
+    $common = $null
+    foreach ($p in $Paths) {
+        if ([string]::IsNullOrEmpty($p)) { return '' }
+        $plain, $query = $p.Split('?', 2)
+        $parts = @($plain.Split('/', [StringSplitOptions]::RemoveEmptyEntries))
+        if ($null -ne $query) { $parts = @($parts | Select-Object -SkipLast 1) }
+        if ($null -eq $common) { $common = $parts; continue }
+        $n = 0
+        while ($n -lt $common.Count -and $n -lt $parts.Count -and $common[$n].Equals($parts[$n], $script:IgnoreCase)) { $n++ }
+        $common = @($common | Select-Object -First $n)
+    }
+    if ($null -eq $common -or $common.Count -le $siteDepth) { return '' }
+    '/' + ($common -join '/')
+}
+
+function Get-CrPlacesText {
+    <# A grouped finding's places in words, e.g. "The whole site, 3 folders and 100 files". #>
+    param([object[]] $Places = @())
+    $nouns = [ordered]@{
+        Site = 'the whole site', 'the whole site'; Subsite = 'subsite', 'subsites'; Library = 'library', 'libraries'; List = 'list', 'lists'
+        Folder = 'folder', 'folders'; File = 'file', 'files'; Item = 'list item', 'list items'
+    }
+    $parts = @(foreach ($type in $nouns.Keys) {
+            $n = @($Places | Where-Object objectType -EQ $type).Count
+            if (-not $n) { continue }
+            if ($type -eq 'Site') { $nouns[$type][0] } else { "$n $($nouns[$type][[int]($n -ne 1)])" }
+        })
+    if (-not $parts.Count) { return $null }
+    $text = if ($parts.Count -eq 1) { $parts[0] } else { (($parts | Select-Object -SkipLast 1) -join ', ') + ' and ' + $parts[-1] }
+    $text.Substring(0, 1).ToUpperInvariant() + $text.Substring(1)
+}
+
+function Group-CrFindings {
+    <#
+      Findings of rules with groupBy in the rule book become one finding per site and rule,
+      and per person for groupBy "principal", listing every place it was found. How a
+      grouped finding is made is in the rule book (finding.grouping). Other findings pass
+      through as they are. Findings keep the order they were first seen in.
+    #>
+    param([object[]] $Findings = @())
+    $book = Get-CrRuleBook
+    $groupBy = @{}
+    foreach ($r in $book.rules) { if ($r.PSObject.Properties['groupBy'] -and $r.groupBy) { $groupBy[$r.id] = $r.groupBy } }
+    $sevRank = @{}
+    for ($i = 0; $i -lt $book.severities.Count; $i++) { $sevRank[$book.severities[$i]] = $i }
+
+    # Each grouped finding holds its place in the order as its key, a string; findings are never strings.
+    $order = [System.Collections.Generic.List[object]]::new()
+    $groups = @{}
+    foreach ($f in $Findings) {
+        if (-not $f) { continue }
+        $by = $groupBy[$f.rule]
+        if (-not $by) { $order.Add($f); continue }
+        $who = if ($by -eq 'principal') { "$($f.principalLogin)" } else { '' }
+        $key = "$("$($f.siteId)".ToLowerInvariant())|$($f.rule)|$($who.ToLowerInvariant())"
+        if (-not $groups.ContainsKey($key)) {
+            $groups[$key] = [pscustomobject]@{ First = $f; Who = $who; Places = [ordered]@{} }
+            $order.Add($key)
+        }
+        $g = $groups[$key]
+        $incoming = if ($f.PSObject.Properties['places'] -and $f.places) { @($f.places) }
+        else { , [pscustomobject][ordered]@{ path = "$($f.path)"; objectType = $f.objectType; severity = $f.severity; permission = $f.permission; detail = $f.detail } }
+        foreach ($p in $incoming) {
+            $placeKey = "$($p.objectType)|$("$($p.path)".ToLowerInvariant())"
+            $have = $g.Places[$placeKey]
+            if (-not $have -or $sevRank[$p.severity] -lt $sevRank[$have.severity] -or
+                ($sevRank[$p.severity] -eq $sevRank[$have.severity] -and (Get-CrPermissionRank $p.permission) -gt (Get-CrPermissionRank $have.permission))) {
+                $g.Places[$placeKey] = $p
+            }
+        }
+    }
+
+    foreach ($item in $order) {
+        if ($item -isnot [string]) { $item; continue }
+        $g = $groups[$item]
+        $f = $g.First
+        $places = @($g.Places.Values | Sort-Object -Stable { $sevRank[$_.severity] }, { "$($_.path)".ToLowerInvariant() })
+        $top = @($places | Sort-Object -Stable { $sevRank[$_.severity] }, { - (Get-CrPermissionRank $_.permission) })[0]
+        $one = $places.Count -eq 1
+        $detail = if ($one) { $top.detail } else { Get-CrPlacesText $places }
+        [pscustomobject][ordered]@{
+            id             = Get-CrFindingId $f.siteId '*' $f.rule $g.Who
+            check          = $f.check
+            rule           = $f.rule
+            severity       = $top.severity
+            siteId         = $f.siteId
+            siteUrl        = $f.siteUrl
+            path           = if ($one) { "$($top.path)" } else { Get-CrSharedPath $f.siteUrl @($places | ForEach-Object { "$($_.path)" }) }
+            objectType     = if ($one) { $top.objectType } else { 'Several' }
+            principal      = $f.principal
+            principalLogin = $g.Who
+            permission     = $top.permission
+            detail         = if ([string]::IsNullOrEmpty($detail)) { $null } else { $detail }
+            verifiedAt     = $f.verifiedAt
+            places         = $places
+        }
+    }
+}
+
 function Get-CrSiteKind {
     <# SharePoint or OneDrive, as the rule book describes it. #>
     param([Parameter(Mandatory)] [string] $Kind)

@@ -222,6 +222,90 @@
     }
   ],
 
+  "grouping": [
+    {
+      "name": "A guest on many items is one finding, rated by the worst place",
+      "findings": [
+        { "rule": "GuestAccess", "objectType": "Folder", "path": "/sites/finance/Shared Documents/EGFR", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Contribute", "canEdit": true },
+        { "rule": "GuestAccess", "objectType": "Folder", "path": "/sites/finance/Shared Documents/EGFR", "principal": "Raj (raj@tailspin.com)", "principalLogin": "i:0#.f|membership|raj_tailspin.com#ext#@contoso.onmicrosoft.com", "permission": "Read" },
+        { "rule": "GuestAccess", "objectType": "File", "path": "/sites/finance/Shared Documents/EGFR/01 Preclinical/notes.pptx", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Read" },
+        { "rule": "GuestAccess", "objectType": "Folder", "path": "/sites/finance/Shared Documents/EGFR/01 Preclinical", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "I:0#.F|MEMBERSHIP|ANN_FABRIKAM.COM#EXT#@CONTOSO.ONMICROSOFT.COM", "permission": "Edit", "canEdit": true }
+      ],
+      "expect": [
+        { "id": "14cf5ee222efacc2d1415f15", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "High", "objectType": "Several", "path": "/sites/finance/Shared Documents/EGFR", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Edit", "detail": "2 folders and 1 file",
+          "places": ["/sites/finance/Shared Documents/EGFR", "/sites/finance/Shared Documents/EGFR/01 Preclinical", "/sites/finance/Shared Documents/EGFR/01 Preclinical/notes.pptx"] },
+        { "id": "ed3829a8b81f40d96ae86827", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "Medium", "objectType": "Folder", "path": "/sites/finance/Shared Documents/EGFR", "principal": "Raj (raj@tailspin.com)", "principalLogin": "i:0#.f|membership|raj_tailspin.com#ext#@contoso.onmicrosoft.com", "permission": "Read", "detail": null,
+          "places": ["/sites/finance/Shared Documents/EGFR"] }
+      ]
+    },
+    {
+      "name": "Access to the whole site and to items is one finding",
+      "findings": [
+        { "rule": "GuestAccess", "objectType": "File", "path": "/sites/finance/Shared Documents/Budget.xlsx", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Read" },
+        { "rule": "GuestAccess", "objectType": "Site", "path": "", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Edit", "detail": "Member of Finance Members", "canEdit": true }
+      ],
+      "expect": [
+        { "id": "14cf5ee222efacc2d1415f15", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "High", "objectType": "Several", "path": "", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Edit", "detail": "The whole site and 1 file",
+          "places": ["", "/sites/finance/Shared Documents/Budget.xlsx"] }
+      ]
+    },
+    {
+      "name": "Links of one kind are one finding per site, across libraries and lists",
+      "findings": [
+        { "rule": "AnyoneLink", "objectType": "File", "path": "/sites/finance/Shared Documents/a.docx", "principal": "Anyone with the link", "principalLogin": "SharingLinks.1.AnonymousView.1", "permission": "View" },
+        { "rule": "OrgWideLink", "objectType": "File", "path": "/sites/finance/Shared Documents/a.docx", "principal": "People in your organization with the link", "principalLogin": "SharingLinks.2.OrganizationView.2", "permission": "View" },
+        { "rule": "AnyoneLink", "objectType": "Item", "path": "/sites/finance/Lists/Requests/DispForm.aspx?ID=7", "principal": "Anyone with the link", "principalLogin": "SharingLinks.3.AnonymousEdit.3", "permission": "Edit" },
+        { "rule": "AnyoneLink", "objectType": "Folder", "path": "/sites/finance/Policies/2026", "principal": "Anyone with the link", "principalLogin": "SharingLinks.4.AnonymousView.4", "permission": "View" }
+      ],
+      "expect": [
+        { "id": "fba03c6ae142a19956ca4602", "check": "Oversharing", "rule": "AnyoneLink", "severity": "High", "objectType": "Several", "path": "", "principal": "Anyone with the link", "principalLogin": "", "permission": "Edit", "detail": "1 folder, 1 file and 1 list item",
+          "places": ["/sites/finance/Lists/Requests/DispForm.aspx?ID=7", "/sites/finance/Policies/2026", "/sites/finance/Shared Documents/a.docx"] },
+        { "id": "0e31007b2eb62cdc9ad39180", "check": "Oversharing", "rule": "OrgWideLink", "severity": "Medium", "objectType": "File", "path": "/sites/finance/Shared Documents/a.docx", "principal": "People in your organization with the link", "principalLogin": "", "permission": "View", "detail": null,
+          "places": ["/sites/finance/Shared Documents/a.docx"] }
+      ]
+    },
+    {
+      "name": "List items in one list are grouped under the list",
+      "findings": [
+        { "rule": "OrgWideLink", "objectType": "Item", "path": "/sites/finance/Lists/Requests/DispForm.aspx?ID=7", "principal": "People in your organization with the link", "principalLogin": "SharingLinks.1.OrganizationView.1", "permission": "View" },
+        { "rule": "OrgWideLink", "objectType": "Item", "path": "/sites/finance/Lists/Requests/DispForm.aspx?ID=8", "principal": "People in your organization with the link", "principalLogin": "SharingLinks.2.OrganizationView.2", "permission": "View" }
+      ],
+      "expect": [
+        { "id": "0e31007b2eb62cdc9ad39180", "check": "Oversharing", "rule": "OrgWideLink", "severity": "Medium", "objectType": "Several", "path": "/sites/finance/Lists/Requests", "principal": "People in your organization with the link", "principalLogin": "", "permission": "View", "detail": "2 list items",
+          "places": ["/sites/finance/Lists/Requests/DispForm.aspx?ID=7", "/sites/finance/Lists/Requests/DispForm.aspx?ID=8"] }
+      ]
+    },
+    {
+      "name": "The same place found twice keeps the more serious",
+      "findings": [
+        { "rule": "GuestAccess", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Read" },
+        { "rule": "GuestAccess", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Edit", "detail": "Shared with them through a link", "canEdit": true }
+      ],
+      "expect": [
+        { "id": "14cf5ee222efacc2d1415f15", "check": "ExternalGuests", "rule": "GuestAccess", "severity": "High", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Payroll", "principal": "Ann (ann@fabrikam.com)", "principalLogin": "i:0#.f|membership|ann_fabrikam.com#ext#@contoso.onmicrosoft.com", "permission": "Edit", "detail": "Shared with them through a link",
+          "places": ["/sites/finance/Shared Documents/Payroll"] }
+      ]
+    },
+    {
+      "name": "Everyone is grouped per way it is granted; other rules are left alone",
+      "findings": [
+        { "rule": "EveryoneGrant", "objectType": "Site", "path": "", "principal": "Finance Visitors", "principalLogin": "Finance Visitors", "permission": "Read", "detail": "The group contains Everyone except external users" },
+        { "rule": "EveryoneGrant", "objectType": "File", "path": "/sites/finance/Shared Documents/Budget.xlsx", "principal": "Everyone", "principalLogin": "c:0(.s|true", "permission": "Edit" },
+        { "rule": "EveryoneGrant", "objectType": "Folder", "path": "/sites/finance/Shared Documents/Plans", "principal": "Everyone", "principalLogin": "c:0(.s|true", "permission": "Read" },
+        { "rule": "BrokenInheritance", "objectType": "Library", "path": "/sites/finance/Shared Documents", "detail": "2 items have their own permissions" },
+        { "rule": "BrokenInheritance", "objectType": "Library", "path": "/sites/finance/Policies", "detail": "1 item has its own permissions" }
+      ],
+      "expect": [
+        { "id": "015834071a6ee70e6a0ec72c", "check": "Oversharing", "rule": "EveryoneGrant", "severity": "High", "objectType": "Site", "path": "", "principal": "Finance Visitors", "principalLogin": "Finance Visitors", "permission": "Read", "detail": "The group contains Everyone except external users",
+          "places": [""] },
+        { "id": "627837ad5c26d1cf9b687be5", "check": "Oversharing", "rule": "EveryoneGrant", "severity": "High", "objectType": "Several", "path": "/sites/finance/Shared Documents", "principal": "Everyone", "principalLogin": "c:0(.s|true", "permission": "Edit", "detail": "1 folder and 1 file",
+          "places": ["/sites/finance/Shared Documents/Budget.xlsx", "/sites/finance/Shared Documents/Plans"] },
+        { "id": "1107109cb2ca176d325cded4", "check": "Oversharing", "rule": "BrokenInheritance", "severity": "Low", "objectType": "Library", "path": "/sites/finance/Shared Documents", "principal": "", "principalLogin": "", "permission": "", "detail": "2 items have their own permissions" },
+        { "id": "e8de4a6b9c48d74e49898566", "check": "Oversharing", "rule": "BrokenInheritance", "severity": "Low", "objectType": "Library", "path": "/sites/finance/Policies", "principal": "", "principalLogin": "", "permission": "", "detail": "1 item has its own permissions" }
+      ]
+    }
+  ],
+
   "siteFacts": [
     {
       "name": "Site facts produce the expected findings",

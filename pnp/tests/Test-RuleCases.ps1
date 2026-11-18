@@ -84,6 +84,27 @@ foreach ($c in $cases.grants) {
     }
 }
 
+foreach ($c in $cases.grouping) {
+    Assert-Case "grouping: $($c.name)" {
+        $raw = @(foreach ($f in $c.findings) {
+                New-CrFinding -Site $site -ObjectType $f.objectType -Path $f.path -Rule $f.rule -Principal "$($f.principal)" -PrincipalLogin "$($f.principalLogin)" `
+                    -Permission "$($f.permission)" -Detail $f.detail -Now $now -CanEdit:([bool]$f.canEdit)
+            })
+        $actual = @(Group-CrFindings $raw)
+        $problem = Compare-Findings $c.expect $actual
+        if ($problem) { return $problem }
+        # A grouped finding lists every place, worst first then by path; an ungrouped one has no list.
+        for ($i = 0; $i -lt $actual.Count; $i++) {
+            $want = $c.expect[$i].PSObject.Properties['places']
+            $got = $actual[$i].PSObject.Properties['places']
+            if (-not $want) { if ($got) { return "finding $i should not list places" }; continue }
+            $wantText = @($want.Value) -join ' | '
+            $gotText = @($actual[$i].places | ForEach-Object { "$($_.path)" }) -join ' | '
+            if ($wantText -cne $gotText) { return "finding $i places: expected '$wantText', got '$gotText'" }
+        }
+    }
+}
+
 foreach ($c in $cases.siteFacts) {
     Assert-Case "site facts: $($c.name)" {
         Compare-Findings $c.expect @(Get-CrSiteFindings -Site $site -Facts $c.facts -StaleDays $c.staleDays -Now $now)

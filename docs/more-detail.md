@@ -39,7 +39,6 @@ The first run writes this file. You can change it with any text editor:
 - SharePoint's own system lists (such as Site Pages and Style Library) aren't scanned.
 - Owner checks count owners. Apart from Microsoft 365 group owners, they don't check whether an owner's account is still active.
 - If a library has no sensitivity label column, its file labels aren't judged.
-- At most 500 findings are kept per library or list; past that, the totals still count everything.
 
 ## Removing it
 
